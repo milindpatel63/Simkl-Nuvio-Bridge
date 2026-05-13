@@ -46,45 +46,6 @@ When `TRAKT_CLIENT_ID` is set, `server.js` serves the browser config automatical
 
 For a hosted website, the site owner does this setup once on the server or serverless host. End users do not provide Trakt app details before pressing `Connect Trakt`.
 
-## Trakt setup
-
-Users should see one `Connect Trakt` button. They should not type Trakt client IDs or secrets.
-
-Create a Trakt API app at `https://trakt.tv/oauth/applications`. Set the Trakt app redirect URI to the callback URL. For local testing, this is:
-
-```text
-http://127.0.0.1:4173/api/trakt/callback
-```
-
-The Trakt Client ID is a 64-character hex string from the Trakt app page. Do not use the Client Secret, app name, redirect URI, or placeholder text in `TRAKT_CLIENT_ID`. After changing any `$env:TRAKT_*` value, stop and restart `server.js`.
-
-Best website setup:
-
-```javascript
-window.NUVIO_TRAKT_BRIDGE_CONFIG = {
-  traktLoginUrlEndpoint: "https://your-domain.example/api/trakt/login-url",
-  traktRefreshEndpoint: "https://your-domain.example/api/trakt/refresh",
-  traktCallbackOrigin: "https://your-domain.example"
-};
-```
-
-This follows the same method as the AIOPicks reference:
-
-- The button calls `POST /api/trakt/login-url`.
-- The server returns a Trakt authorization URL, a one-time state value, and the app's public Trakt Client ID.
-- The browser opens that URL in a popup.
-- Trakt uses the user's trakt.tv cookies and asks them to approve access.
-- Your callback endpoint exchanges the code server-side.
-- The callback popup sends the state, public Client ID, and tokens back to the opener with `postMessage` and `BroadcastChannel`.
-- The browser validates the state value and uses the public Client ID as Trakt's required `trakt-api-key` for later user-data requests.
-
-Example endpoints are included:
-
-- `api/trakt-login-url.example.js`
-- `api/trakt-callback.example.js`
-- `api/trakt-refresh.example.js`
-
-Do not publish a frontend file containing your Trakt client secret.
 
 ## ID mapping notes
 
