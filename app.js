@@ -49,9 +49,10 @@ let pendingTraktState = null;
 let pendingTraktClientId = "";
 let traktBroadcastChannel = null;
 const PREVIEW_PAGE_SIZE = 50;
-const EPISODE_REMAP_META_TIMEOUT_MS = 1500;
-const EPISODE_REMAP_TRAKT_TIMEOUT_MS = 2500;
-const EPISODE_REMAP_TOTAL_BUDGET_MS = 15000;
+const EPISODE_REMAP_META_TIMEOUT_MS = 3000;
+const EPISODE_REMAP_TRAKT_TIMEOUT_MS = 4500;
+const EPISODE_REMAP_TOTAL_BUDGET_MS = 30000;
+const EPISODE_REMAP_FALLBACK_LOG_LIMIT = 2;
 let episodeMappingContextPromise = null;
 let episodeMappingContextKey = "";
 const addonManifestCache = new Map();
@@ -842,6 +843,7 @@ async function prepareEpisodeMapper() {
     context.fallbackStats = {};
     context.fallbackLogCounts = {};
     logLine(`Using Nuvio metadata addon for episode remapping: ${context.addons[0].name}.`);
+    logLine(`Episode remapping fallback guard: addon ${Math.round(context.metaTimeoutMs / 1000)}s, Trakt ${Math.round(context.traktTimeoutMs / 1000)}s, total ${Math.round(context.totalBudgetMs / 1000)}s.`);
     return context;
   } catch (error) {
     logLine(`Episode remapping unavailable: ${error.message}`);
@@ -1212,10 +1214,8 @@ function noteEpisodeRemapFallback(context, type, message) {
   context.fallbackLogCounts[type] = (context.fallbackLogCounts[type] || 0) + 1;
 
   const count = context.fallbackLogCounts[type];
-  if (count <= 5) {
+  if (count <= EPISODE_REMAP_FALLBACK_LOG_LIMIT) {
     logLine(`Episode remapping fallback: ${message}`);
-  } else if (count === 6) {
-    logLine(`Episode remapping fallback: more ${type} fallbacks occurred; summary will be shown at the end.`);
   }
 }
 
@@ -1248,7 +1248,7 @@ function episodeMapperCanContinue(context) {
     context.timeoutLogged = true;
     context.fallbackStats ||= {};
     context.fallbackStats.budget = (context.fallbackStats.budget || 0) + 1;
-    logLine("Episode remapping is taking too long. Continuing this sync without remapping the remaining episodes.");
+    logLine(`Episode remapping exceeded the ${Math.round(budgetMs / 1000)}s guard. Continuing this sync without remapping the remaining episodes.`);
   }
   return false;
 }
