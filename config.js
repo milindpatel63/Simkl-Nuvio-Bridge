@@ -1,5 +1,5 @@
-window.NUVIO_TRAKT_BRIDGE_CONFIG = {
-  traktLoginUrlEndpoint: "/api/trakt/login-url",
-  traktRefreshEndpoint: "/api/trakt/refresh",
-  traktCallbackOrigin: "",
+window.NUVIO_SIMKL_BRIDGE_CONFIG = {
+  simklLoginUrlEndpoint: "/api/simkl/login-url",
+  simklRefreshEndpoint: "/api/simkl/refresh",
+  simklCallbackOrigin: "",
 };

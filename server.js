@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const root = dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 4173);
 const host = process.env.HOST || "127.0.0.1";
-const TRAKT_CLIENT_ID_PATTERN = /^[a-f0-9]{64}$/i;
+const SIMKL_CLIENT_ID_PATTERN = /^[a-z0-9]+$/i;
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 const oauthStates = new Map();
 const mime = {
@@ -21,19 +21,19 @@ const mime = {
 const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url || "/", `http://${request.headers.host}`);
-    if (url.pathname === "/api/trakt/login-url" && request.method === "POST") {
+    if (url.pathname === "/api/simkl/login-url" && request.method === "POST") {
       await handleLoginUrl(response);
       return;
     }
-    if (url.pathname === "/api/trakt/callback" && request.method === "GET") {
+    if (url.pathname === "/api/simkl/callback" && request.method === "GET") {
       await handleCallback(url, response);
       return;
     }
-    if (url.pathname === "/api/trakt/refresh" && request.method === "POST") {
+    if (url.pathname === "/api/simkl/refresh" && request.method === "POST") {
       await handleRefresh(request, response);
       return;
     }
-    if (url.pathname === "/config.js" && process.env.TRAKT_CLIENT_ID) {
+    if (url.pathname === "/config.js" && process.env.SIMKL_CLIENT_ID) {
       serveRuntimeConfig(response);
       return;
     }
@@ -44,14 +44,14 @@ const server = http.createServer(async (request, response) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`Nuvio Trakt Bridge running at http://${host}:${port}/`);
+  console.log(`Nuvio Simkl Bridge running at http://${host}:${port}/`);
 });
 
 async function handleLoginUrl(response) {
-  const { clientId, redirectUri } = traktConfig();
+  const { clientId, redirectUri } = simklConfig();
   const state = crypto.randomUUID();
   rememberOauthState(state);
-  const url = new URL("https://trakt.tv/oauth/authorize");
+  const url = new URL("https://simkl.com/oauth/authorize");
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", clientId);
   url.searchParams.set("redirect_uri", redirectUri);
@@ -60,24 +60,24 @@ async function handleLoginUrl(response) {
 }
 
 async function handleCallback(url, response) {
-  const { clientId, clientSecret, redirectUri } = traktConfig();
+  const { clientId, clientSecret, redirectUri } = simklConfig();
   const code = url.searchParams.get("code");
   const error = url.searchParams.get("error");
   const state = url.searchParams.get("state") || "";
   if (!consumeOauthState(state)) {
     html(response, callbackHtml({
-      source: "trakt-oauth",
+      source: "simkl-oauth",
       status: "error",
       state,
       client_id: clientId,
       error: "invalid_state",
-      error_description: "The Trakt authorization state was missing or expired. Please close this popup and connect again.",
+      error_description: "The Simkl authorization state was missing or expired. Please close this popup and connect again.",
     }));
     return;
   }
   if (error || !code) {
     html(response, callbackHtml({
-      source: "trakt-oauth",
+      source: "simkl-oauth",
       status: "error",
       state,
       client_id: clientId,
@@ -87,12 +87,11 @@ async function handleCallback(url, response) {
     return;
   }
 
-  const traktResponse = await fetch("https://api.trakt.tv/oauth/token", {
+  const simklResponse = await fetch("https://api.simkl.com/oauth/token", {
     method: "POST",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
-      "User-Agent": "Nuvio-Trakt-Bridge/1.0",
     },
     body: JSON.stringify({
       code,
@@ -102,35 +101,34 @@ async function handleCallback(url, response) {
       grant_type: "authorization_code",
     }),
   });
-  const { payload, text } = await readJsonResponse(traktResponse);
-  const tokenError = traktResponse.ok ? null : tokenExchangeError(traktResponse, payload, text);
+  const { payload, text } = await readJsonResponse(simklResponse);
+  const tokenError = simklResponse.ok ? null : tokenExchangeError(simklResponse, payload, text);
   if (tokenError) {
-    console.warn(`Trakt token exchange failed: ${tokenError.error_description}`);
+    console.warn(`Simkl token exchange failed: ${tokenError.error_description}`);
   }
   html(response, callbackHtml({
-    source: "trakt-oauth",
-    status: traktResponse.ok ? "success" : "error",
+    source: "simkl-oauth",
+    status: simklResponse.ok ? "success" : "error",
     state,
     client_id: clientId,
-    tokens: traktResponse.ok ? payload : undefined,
+    tokens: simklResponse.ok ? payload : undefined,
     error: tokenError?.error,
     error_description: tokenError?.error_description,
   }));
 }
 
 async function handleRefresh(request, response) {
-  const { clientId, clientSecret, redirectUri } = traktConfig();
+  const { clientId, clientSecret, redirectUri } = simklConfig();
   const body = await readJsonBody(request);
   if (!body.refresh_token) {
     json(response, 400, { error: "Missing refresh token" });
     return;
   }
-  const traktResponse = await fetch("https://api.trakt.tv/oauth/token", {
+  const simklResponse = await fetch("https://api.simkl.com/oauth/token", {
     method: "POST",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
-      "User-Agent": "Nuvio-Trakt-Bridge/1.0",
     },
     body: JSON.stringify({
       refresh_token: body.refresh_token,
@@ -140,8 +138,8 @@ async function handleRefresh(request, response) {
       grant_type: "refresh_token",
     }),
   });
-  const text = await traktResponse.text();
-  response.writeHead(traktResponse.status, { "Content-Type": "application/json; charset=utf-8" });
+  const text = await simklResponse.text();
+  response.writeHead(simklResponse.status, { "Content-Type": "application/json; charset=utf-8" });
   response.end(text || "{}");
 }
 
@@ -155,15 +153,15 @@ async function serveStatic(pathname, response) {
 }
 
 function callbackHtml(payload) {
-  const targetOrigin = process.env.TRAKT_CALLBACK_ORIGIN || `http://${host}:${port}`;
+  const targetOrigin = process.env.SIMKL_CALLBACK_ORIGIN || `http://${host}:${port}`;
   const jsonPayload = JSON.stringify(payload).replace(/</g, "\\u003c");
   return `<!doctype html>
-<html><head><meta charset="utf-8"><title>Trakt connected</title></head>
+<html><head><meta charset="utf-8"><title>Simkl connected</title></head>
 <body>
 <script>
 const payload = ${jsonPayload};
 try { if (window.opener) window.opener.postMessage(payload, ${JSON.stringify(targetOrigin)}); } catch (error) {}
-try { new BroadcastChannel("nuvio-trakt-bridge.trakt-oauth").postMessage(payload); } catch (error) {}
+try { new BroadcastChannel("nuvio-simkl-bridge.simkl-oauth").postMessage(payload); } catch (error) {}
 window.close();
 </script>
 You can close this window.
@@ -171,11 +169,11 @@ You can close this window.
 }
 
 function serveRuntimeConfig(response) {
-  const origin = process.env.TRAKT_CALLBACK_ORIGIN || `http://${host}:${port}`;
-  const script = `window.NUVIO_TRAKT_BRIDGE_CONFIG = ${JSON.stringify({
-    traktLoginUrlEndpoint: "/api/trakt/login-url",
-    traktRefreshEndpoint: "/api/trakt/refresh",
-    traktCallbackOrigin: origin,
+  const origin = process.env.SIMKL_CALLBACK_ORIGIN || `http://${host}:${port}`;
+  const script = `window.NUVIO_SIMKL_BRIDGE_CONFIG = ${JSON.stringify({
+    simklLoginUrlEndpoint: "/api/simkl/login-url",
+    simklRefreshEndpoint: "/api/simkl/refresh",
+    simklCallbackOrigin: origin,
   }, null, 2)};`;
   response.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8" });
   response.end(script);
@@ -188,20 +186,20 @@ function requireEnv(names) {
   }
 }
 
-function traktConfig() {
-  requireEnv(["TRAKT_CLIENT_ID", "TRAKT_CLIENT_SECRET", "TRAKT_REDIRECT_URI"]);
-  const redirectUri = String(process.env.TRAKT_REDIRECT_URI || "").trim();
+function simklConfig() {
+  requireEnv(["SIMKL_CLIENT_ID", "SIMKL_CLIENT_SECRET", "SIMKL_REDIRECT_URI"]);
+  const redirectUri = String(process.env.SIMKL_REDIRECT_URI || "").trim();
   validateRedirectUri(redirectUri);
   return {
-    clientId: validatedTraktClientId(),
-    clientSecret: String(process.env.TRAKT_CLIENT_SECRET || "").trim(),
+    clientId: validatedSimklClientId(),
+    clientSecret: String(process.env.SIMKL_CLIENT_SECRET || "").trim(),
     redirectUri,
   };
 }
 
-function validatedTraktClientId() {
-  const clientId = String(process.env.TRAKT_CLIENT_ID || "").trim();
-  if (!TRAKT_CLIENT_ID_PATTERN.test(clientId)) {
+function validatedSimklClientId() {
+  const clientId = String(process.env.SIMKL_CLIENT_ID || "").trim();
+  if (!SIMKL_CLIENT_ID_PATTERN.test(clientId)) {
     throw serverSetupError();
   }
   return clientId;
@@ -231,31 +229,22 @@ async function readJsonResponse(response) {
 }
 
 function tokenExchangeError(response, payload, text) {
-  const requestId = response.headers.get("x-request-id");
   const detail = payload.error_description
     || payload.message
     || payload.error
     || cleanResponseText(text)
     || response.statusText
-    || "Trakt did not return a readable error body.";
-  const suffix = requestId ? ` Trakt request id: ${requestId}.` : "";
+    || "Simkl did not return a readable error body.";
   return {
-    error: payload.error || "trakt_token_exchange_failed",
-    error_description: `Trakt token exchange failed with HTTP ${response.status}: ${detail}.${suffix}`,
+    error: payload.error || "simkl_token_exchange_failed",
+    error_description: `Simkl token exchange failed with HTTP ${response.status}: ${detail}.`,
   };
 }
 
-function cleanResponseText(text) {
-  return String(text || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 500);
-}
-
 function serverSetupError() {
-  const error = new Error("Trakt sign-in is not configured on this server.");
+  const error = new Error("Simkl sign-in is not configured on this server.");
   error.status = 503;
-  error.publicMessage = "Trakt sign-in is not configured on this server yet. The site owner needs to configure the bridge OAuth app server-side; users should only have to press Connect Trakt.";
+  error.publicMessage = "Simkl sign-in is not configured on this server yet. The site owner needs to configure the bridge OAuth app server-side; users should only have to press Connect Simkl.";
   return error;
 }
 

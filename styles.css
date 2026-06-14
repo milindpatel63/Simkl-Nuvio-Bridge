@@ -134,8 +134,8 @@ a {
   margin-left: -10px;
 }
 
-.brand__logos .trakt-logo,
-.connector-card__logo.trakt-logo {
+.brand__logos .simkl-logo,
+.connector-card__logo.simkl-logo {
   border-radius: var(--radius);
   background: transparent;
   object-fit: contain;

@@ -3,47 +3,47 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Nuvio Trakt Bridge</title>
-    <meta name="description" content="Sync Trakt watched history and continue watching progress into Nuvio Sync.">
+    <title>Nuvio Simkl Bridge</title>
+    <meta name="description" content="Sync Simkl watched history and continue watching progress into Nuvio Sync.">
     <link rel="preconnect" href="https://nuvioapp.space">
-    <link rel="preconnect" href="https://trakt.tv">
+    <link rel="preconnect" href="https://simkl.com">
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
     <div class="app-shell">
       <header id="top" class="hero">
         <nav class="topbar" aria-label="App status">
-          <a class="brand" href="#top" aria-label="Nuvio Trakt Bridge home">
+          <a class="brand" href="#top" aria-label="Nuvio Simkl Bridge home">
             <span class="brand__logos" aria-hidden="true">
               <img src="https://nuvioapp.space/assets/Logo_1080x1080.png" alt="">
-              <img class="trakt-logo" src="./assets/trakt-logomark.svg" alt="">
+              <img class="simkl-logo" src="./assets/simkl-logomark.svg" alt="">
             </span>
             <span>
-              <strong>Nuvio Trakt Bridge</strong>
-              <small>Trakt to Nuvio Sync</small>
+              <strong>Nuvio Simkl Bridge</strong>
+              <small>Simkl to Nuvio Sync</small>
             </span>
           </a>
           <div class="topbar__status" aria-live="polite">
-            <span id="trakt-status" class="status-pill">Trakt disconnected</span>
+            <span id="simkl-status" class="status-pill">Simkl disconnected</span>
             <span id="nuvio-status" class="status-pill">Nuvio disconnected</span>
           </div>
         </nav>
 
         <div class="hero__copy">
-          <h1>Nuvio Trakt Bridge</h1>
-          <p>Import watched history, continue watching progress, and optional library data from Trakt into Nuvio.</p>
+          <h1>Nuvio Simkl Bridge</h1>
+          <p>Import watched history, continue watching progress, and optional library data from Simkl into Nuvio. Perfect for movies, TV shows, and anime.</p>
         </div>
       </header>
 
       <main class="main-stack">
         <section class="connect-grid" aria-label="Account connections">
-          <article class="panel connector-card" id="trakt-card">
+          <article class="panel connector-card" id="simkl-card">
             <div class="connector-card__head">
-              <h2>Connect Trakt</h2>
+              <h2>Connect Simkl</h2>
             </div>
-            <p class="card-copy">Use Trakt OAuth to approve access in a pop-up.</p>
+            <p class="card-copy">Use Simkl OAuth to approve access in a pop-up.</p>
             <div class="button-row">
-              <button id="start-trakt-login" class="button button--light" type="button">Connect Trakt</button>
+              <button id="start-simkl-login" class="button button--light" type="button">Connect Simkl</button>
             </div>
           </article>
 
@@ -79,13 +79,13 @@
           <div class="section-head">
             <div>
               <p class="eyebrow">Sync</p>
-              <h2>Import from Trakt</h2>
+              <h2>Import from Simkl</h2>
             </div>
           </div>
 
           <div class="field-heading">
             <h3>Sync scopes</h3>
-            <p>Choose which Trakt data to import</p>
+            <p>Choose which Simkl data to import</p>
           </div>
 
           <div class="scope-grid">
@@ -114,14 +114,14 @@
                 <input id="sync-watchlist" type="checkbox">
                 <span>
                   <strong>Watchlist</strong>
-                  <small>Save Trakt watchlist items to the Nuvio library</small>
+                  <small>Save Simkl watchlist items to the Nuvio library</small>
                 </span>
               </label>
               <label class="scope-card">
                 <input id="sync-collection" type="checkbox">
                 <span>
                   <strong>Collection</strong>
-                  <small>Save Trakt collection items to the Nuvio library</small>
+                  <small>Save Simkl collection items to the Nuvio library</small>
                 </span>
               </label>
             </div>

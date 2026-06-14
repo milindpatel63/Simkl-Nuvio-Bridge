@@ -1,19 +1,19 @@
 "use strict";
 
-const TRAKT_API = "https://api.trakt.tv";
+const SIMKL_API = "https://api.simkl.com";
 const NUVIO_BASE = "https://dpyhjjcoabcglfmgecug.supabase.co";
 const NUVIO_KEY = "sb_publishable_zcNkgqGJjBtj8GoRlMvl9A_zkdmXhf5";
-const APP_CONFIG = globalThis.NUVIO_TRAKT_BRIDGE_CONFIG || {};
-const PREFS_KEY = "nuvio-trakt-bridge:prefs:v1";
-const SESSION_KEY = "nuvio-trakt-bridge:session:v1";
-const LEGACY_STORAGE_KEY = "nuvio-trakt-bridge:v1";
+const APP_CONFIG = globalThis.NUVIO_SIMKL_BRIDGE_CONFIG || {};
+const PREFS_KEY = "nuvio-simkl-bridge:prefs:v1";
+const SESSION_KEY = "nuvio-simkl-bridge:session:v1";
+const LEGACY_STORAGE_KEY = "nuvio-simkl-bridge:v1";
 
 const $ = (selector) => document.querySelector(selector);
 const dom = {
-  traktStatus: $("#trakt-status"),
+  simklStatus: $("#simkl-status"),
   nuvioStatus: $("#nuvio-status"),
-  startTraktLogin: $("#start-trakt-login"),
-  logoutTrakt: $("#logout-trakt"),
+  startSimklLogin: $("#start-simkl-login"),
+  logoutSimkl: $("#logout-simkl"),
   nuvioEmail: $("#nuvio-email"),
   nuvioPassword: $("#nuvio-password"),
   loginNuvio: $("#login-nuvio"),
@@ -44,27 +44,26 @@ let state = loadState();
 let lastPlan = null;
 let previewRows = [];
 let previewPage = 1;
-let traktPending = false;
-let pendingTraktState = null;
-let pendingTraktClientId = "";
-let traktBroadcastChannel = null;
+let simklPending = false;
+let pendingSimklState = null;
+let pendingSimklClientId = "";
+let simklBroadcastChannel = null;
 const PREVIEW_PAGE_SIZE = 50;
-const EPISODE_REMAP_META_TIMEOUT_MS = 3000;
-const EPISODE_REMAP_TRAKT_TIMEOUT_MS = 4500;
-const EPISODE_REMAP_TOTAL_BUDGET_MS = 30000;
-const EPISODE_REMAP_FALLBACK_LOG_LIMIT = 2;
+const EPISODE_REMAP_META_TIMEOUT_MS = 15000;
+const EPISODE_REMAP_SIMKL_TIMEOUT_MS = 15000;
+const EPISODE_REMAP_TOTAL_BUDGET_MS = 30 * 60 * 1000;
 let episodeMappingContextPromise = null;
 let episodeMappingContextKey = "";
 const addonManifestCache = new Map();
 const addonMetaCache = new Map();
 const addonEpisodeCache = new Map();
-const traktEpisodeCache = new Map();
+const simklEpisodeCache = new Map();
 const episodeMappingCache = new Map();
 const normalizedEpisodeTitleCache = new Map();
 
 function defaultState() {
   return {
-    trakt: {
+    simkl: {
       token: null,
       clientId: "",
     },
@@ -113,7 +112,7 @@ function hydrateForm() {
   renderProfiles();
   updateAuthStatus();
   clearLog();
-  logLine("Ready. Connect Trakt and Nuvio, then preview before syncing.");
+  logLine("Ready. Connect Simkl and Nuvio, then preview before syncing.");
 }
 
 function readOptions() {
@@ -133,24 +132,24 @@ function readOptions() {
 }
 
 function updateAuthStatus() {
-  const traktConnected = Boolean(state.trakt.token?.access_token);
+  const simklConnected = Boolean(state.simkl.token?.access_token);
   const nuvioConnected = Boolean(state.nuvio.session?.access_token);
 
-  dom.traktStatus.textContent = traktConnected ? "Trakt connected" : "Trakt disconnected";
-  dom.traktStatus.classList.toggle("is-connected", traktConnected);
+  dom.simklStatus.textContent = simklConnected ? "Simkl connected" : "Simkl disconnected";
+  dom.simklStatus.classList.toggle("is-connected", simklConnected);
   dom.nuvioStatus.textContent = nuvioConnected ? "Nuvio connected" : "Nuvio disconnected";
   dom.nuvioStatus.classList.toggle("is-connected", nuvioConnected);
-  updateAuthButtons(traktConnected, nuvioConnected);
-  updateSyncActionButtons(traktConnected, nuvioConnected);
+  updateAuthButtons(simklConnected, nuvioConnected);
+  updateSyncActionButtons(simklConnected, nuvioConnected);
 }
 
-function updateAuthButtons(traktConnected, nuvioConnected) {
-  updateConnectedButton(dom.startTraktLogin, traktConnected, "Disconnect Trakt");
+function updateAuthButtons(simklConnected, nuvioConnected) {
+  updateConnectedButton(dom.startSimklLogin, simklConnected, "Disconnect Simkl");
   updateConnectedButton(dom.loginNuvio, nuvioConnected, "Disconnect");
 }
 
-function updateSyncActionButtons(traktConnected, nuvioConnected) {
-  const ready = traktConnected && nuvioConnected;
+function updateSyncActionButtons(simklConnected, nuvioConnected) {
+  const ready = simklConnected && nuvioConnected;
   dom.previewSync.disabled = !ready;
   dom.runSync.disabled = !ready;
 }
@@ -167,32 +166,25 @@ function updateConnectedButton(button, connected, connectedLabel) {
     return;
   }
   button.removeAttribute("aria-pressed");
-  if (!(button === dom.startTraktLogin && traktPending)) {
+  if (!(button === dom.startSimklLogin && simklPending)) {
     restoreButtonLabel(button);
   }
 }
 
-function browserRedirectUri() {
-  if (!globalThis.location || location.protocol === "file:") {
-    return "http://127.0.0.1:4173/";
-  }
-  return `${location.origin}${location.pathname}`;
+function simklLoginUrlEndpoint() {
+  return String(APP_CONFIG.simklLoginUrlEndpoint || "/api/simkl/login-url").trim();
 }
 
-function traktLoginUrlEndpoint() {
-  return String(APP_CONFIG.traktLoginUrlEndpoint || "/api/trakt/login-url").trim();
+function simklRefreshEndpoint() {
+  return String(APP_CONFIG.simklRefreshEndpoint || "/api/simkl/refresh").trim();
 }
 
-function traktRefreshEndpoint() {
-  return String(APP_CONFIG.traktRefreshEndpoint || "/api/trakt/refresh").trim();
+function simklCallbackOrigin() {
+  return String(APP_CONFIG.simklCallbackOrigin || location.origin || "").trim();
 }
 
-function traktCallbackOrigin() {
-  return String(APP_CONFIG.traktCallbackOrigin || location.origin || "").trim();
-}
-
-function allowedTraktOrigins() {
-  return [...new Set([location.origin, traktCallbackOrigin()].filter(Boolean))];
+function allowedSimklOrigins() {
+  return [...new Set([location.origin, simklCallbackOrigin()].filter(Boolean))];
 }
 
 function renderProfiles() {
@@ -210,18 +202,18 @@ function renderProfiles() {
 }
 
 function setBusy(isBusy) {
-  const traktConnected = Boolean(state.trakt.token?.access_token);
+  const simklConnected = Boolean(state.simkl.token?.access_token);
   const nuvioConnected = Boolean(state.nuvio.session?.access_token);
-  const syncReady = traktConnected && nuvioConnected;
+  const syncReady = simklConnected && nuvioConnected;
   [
-    dom.startTraktLogin,
+    dom.startSimklLogin,
     dom.loginNuvio,
     dom.previewSync,
     dom.runSync,
   ].forEach((button) => {
     if (!button) return;
     button.disabled = isBusy
-      || (button === dom.startTraktLogin && traktPending)
+      || (button === dom.startSimklLogin && simklPending)
       || ((button === dom.previewSync || button === dom.runSync) && !syncReady);
   });
 }
@@ -367,62 +359,62 @@ async function requestJson(url, options = {}) {
   return { data, headers: response.headers, status: response.status };
 }
 
-async function startTraktPopupLogin() {
+async function startSimklPopupLogin() {
   readOptions();
-  if (traktPending) {
+  if (simklPending) {
     return;
   }
 
-  traktPending = true;
-  dom.startTraktLogin.disabled = true;
-  setButtonLabel(dom.startTraktLogin, "Opening Trakt...");
-  logLine("Opening Trakt sign in.");
+  simklPending = true;
+  dom.startSimklLogin.disabled = true;
+  setButtonLabel(dom.startSimklLogin, "Opening Simkl...");
+  logLine("Opening Simkl sign in.");
   try {
-    const { data } = await requestJson(traktLoginUrlEndpoint(), {
+    const { data } = await requestJson(simklLoginUrlEndpoint(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ return_origin: location.origin }),
     });
     if (!data?.url) {
-      throw new Error(resolveRemoteError(data) || "The Trakt login endpoint did not return a URL.");
+      throw new Error(resolveRemoteError(data) || "The Simkl login endpoint did not return a URL.");
     }
-    pendingTraktState = data.state || null;
-    pendingTraktClientId = normalizeTraktClientId(data.client_id || data.clientId)
-      || extractTraktClientIdFromUrl(data.url);
-    if (!pendingTraktClientId) {
-      throw new Error("The Trakt login endpoint did not return a valid app client id.");
+    pendingSimklState = data.state || null;
+    pendingSimklClientId = normalizeSimklClientId(data.client_id || data.clientId)
+      || extractSimklClientIdFromUrl(data.url);
+    if (!pendingSimklClientId) {
+      throw new Error("The Simkl login endpoint did not return a valid app client id.");
     }
-    const popup = window.open(data.url, "trakt-sign-in", "width=600,height=780");
+    const popup = window.open(data.url, "simkl-sign-in", "width=600,height=780");
     if (!popup) {
-      throw new Error("Allow pop-ups for this site, then click Connect Trakt again.");
+      throw new Error("Allow pop-ups for this site, then click Connect Simkl again.");
     }
     popup.focus();
-    setButtonLabel(dom.startTraktLogin, "Waiting for Trakt...");
+    setButtonLabel(dom.startSimklLogin, "Waiting for Simkl...");
     const popupWatcher = window.setInterval(() => {
-      if (!traktPending) {
+      if (!simklPending) {
         window.clearInterval(popupWatcher);
         return;
       }
       if (popup.closed) {
         window.clearInterval(popupWatcher);
-        traktPending = false;
-        pendingTraktState = null;
-        pendingTraktClientId = "";
-        restoreButtonLabel(dom.startTraktLogin);
+        simklPending = false;
+        pendingSimklState = null;
+        pendingSimklClientId = "";
+        restoreButtonLabel(dom.startSimklLogin);
         setBusy(false);
-        logLine("Trakt sign in window closed before finishing.");
+        logLine("Simkl sign in window closed before finishing.");
       }
     }, 700);
-    logLine("Approve access in the Trakt popup. This page will update automatically.");
+    logLine("Approve access in the Simkl popup. This page will update automatically.");
   } catch (error) {
-    traktPending = false;
-    dom.startTraktLogin.disabled = false;
-    restoreButtonLabel(dom.startTraktLogin);
+    simklPending = false;
+    dom.startSimklLogin.disabled = false;
+    restoreButtonLabel(dom.startSimklLogin);
     throw new Error(loginEndpointError(error));
   }
 }
 
-function normalizeTraktToken(token) {
+function normalizeSimklToken(token) {
   return {
     access_token: token.access_token,
     refresh_token: token.refresh_token,
@@ -433,7 +425,7 @@ function normalizeTraktToken(token) {
   };
 }
 
-function normalizeTraktOauthPayload(rawPayload) {
+function normalizeSimklOauthPayload(rawPayload) {
   if (rawPayload == null) return null;
   let data = rawPayload;
   if (typeof data === "string") {
@@ -444,7 +436,7 @@ function normalizeTraktOauthPayload(rawPayload) {
     }
   }
   if (!data || typeof data !== "object") return null;
-  if (data.source === "trakt-oauth") {
+  if (data.source === "simkl-oauth") {
     data.client_id = data.client_id || data.clientId || "";
     if (!data.tokens && (data.access_token || data.refresh_token)) {
       data.tokens = {
@@ -458,9 +450,9 @@ function normalizeTraktOauthPayload(rawPayload) {
     return data;
   }
   const type = typeof data.type === "string" ? data.type.toUpperCase() : "";
-  if (type === "TRAKT_AUTH_SUCCESS") {
+  if (type === "SIMKL_AUTH_SUCCESS") {
     return {
-      source: "trakt-oauth",
+      source: "simkl-oauth",
       status: "success",
       client_id: data.client_id || data.clientId || "",
       tokens: {
@@ -472,56 +464,56 @@ function normalizeTraktOauthPayload(rawPayload) {
       },
     };
   }
-  if (type === "TRAKT_AUTH_ERROR") {
+  if (type === "SIMKL_AUTH_ERROR") {
     return {
-      source: "trakt-oauth",
+      source: "simkl-oauth",
       status: "error",
       client_id: data.client_id || data.clientId || "",
-      error: data.error || data.message || "trakt_error",
+      error: data.error || data.message || "simkl_error",
       error_description: data.error_description || data.description || "",
     };
   }
   return null;
 }
 
-function handleTraktOauthPayload(rawPayload, origin = "") {
-  const payload = normalizeTraktOauthPayload(rawPayload);
-  if (!payload || payload.source !== "trakt-oauth") return;
-  if (origin && !allowedTraktOrigins().includes(origin)) return;
+function handleSimklOauthPayload(rawPayload, origin = "") {
+  const payload = normalizeSimklOauthPayload(rawPayload);
+  if (!payload || payload.source !== "simkl-oauth") return;
+  if (origin && !allowedSimklOrigins().includes(origin)) return;
 
-  traktPending = false;
-  restoreButtonLabel(dom.startTraktLogin);
-  dom.startTraktLogin.disabled = false;
-  if (pendingTraktState && payload.state !== pendingTraktState) {
-    pendingTraktState = null;
-    pendingTraktClientId = "";
-    logLine("Trakt sign in failed: authorization state did not match.");
-    toast("Trakt sign in failed. Try connecting again.");
+  simklPending = false;
+  restoreButtonLabel(dom.startSimklLogin);
+  dom.startSimklLogin.disabled = false;
+  if (pendingSimklState && payload.state !== pendingSimklState) {
+    pendingSimklState = null;
+    pendingSimklClientId = "";
+    logLine("Simkl sign in failed: authorization state did not match.");
+    toast("Simkl sign in failed. Try connecting again.");
     return;
   }
   if (payload.status === "success" && payload.tokens?.access_token) {
-    const clientId = normalizeTraktClientId(payload.client_id || payload.clientId)
-      || pendingTraktClientId
-      || normalizeTraktClientId(state.trakt.clientId);
+    const clientId = normalizeSimklClientId(payload.client_id || payload.clientId)
+      || pendingSimklClientId
+      || normalizeSimklClientId(state.simkl.clientId);
     if (!clientId) {
-      logLine("Trakt sign in failed: missing app client id from the login endpoint.");
-      toast("Trakt sign in failed. The login endpoint is missing its app client id.");
+      logLine("Simkl sign in failed: missing app client id from the login endpoint.");
+      toast("Simkl sign in failed. The login endpoint is missing its app client id.");
       return;
     }
-    state.trakt.token = normalizeTraktToken(payload.tokens);
-    state.trakt.clientId = clientId;
-    pendingTraktState = null;
-    pendingTraktClientId = "";
+    state.simkl.token = normalizeSimklToken(payload.tokens);
+    state.simkl.clientId = clientId;
+    pendingSimklState = null;
+    pendingSimklClientId = "";
     saveState();
     updateAuthStatus();
-    logLine("Trakt connected.");
-    toast("Trakt connected.");
+    logLine("Simkl connected.");
+    toast("Simkl connected.");
     return;
   }
-  const message = payload.error_description || payload.error || "Trakt rejected the sign in request.";
-  pendingTraktState = null;
-  pendingTraktClientId = "";
-  logLine(`Trakt sign in failed: ${message}`);
+  const message = payload.error_description || payload.error || "Simkl rejected the sign in request.";
+  pendingSimklState = null;
+  pendingSimklClientId = "";
+  logLine(`Simkl sign in failed: ${message}`);
   toast(message);
 }
 
@@ -537,44 +529,44 @@ function resolveRemoteError(payload) {
 
 function loginEndpointError(error) {
   if (error?.status === 404) {
-    return "The Trakt login endpoint is missing. Deploy /api/trakt/login-url like the reference site, then try again.";
+    return "The Simkl login endpoint is missing. Deploy /api/simkl/login-url like the reference site, then try again.";
   }
   const remote = resolveRemoteError(error?.body);
   if (remote) {
     return remote;
   }
-  return error?.message || "Unable to start Trakt sign in.";
+  return error?.message || "Unable to start Simkl sign in.";
 }
 
-async function ensureTraktAccessToken() {
-  if (!state.trakt.token?.access_token) {
-    throw new Error("Connect Trakt first.");
+async function ensureSimklAccessToken() {
+  if (!state.simkl.token?.access_token) {
+    throw new Error("Connect Simkl first.");
   }
 
-  const createdAt = Number(state.trakt.token.created_at || 0);
-  const expiresIn = Number(state.trakt.token.expires_in || 0);
+  const createdAt = Number(state.simkl.token.created_at || 0);
+  const expiresIn = Number(state.simkl.token.expires_in || 0);
   const expiresAt = createdAt + expiresIn;
   const now = Math.floor(Date.now() / 1000);
 
   if (expiresAt && now < expiresAt - 90) {
-    return state.trakt.token.access_token;
+    return state.simkl.token.access_token;
   }
 
-  if (!state.trakt.token.refresh_token) {
-    throw new Error("Trakt token expired and no refresh token was saved. Reconnect Trakt.");
+  if (!state.simkl.token.refresh_token) {
+    throw new Error("Simkl token expired and no refresh token was saved. Reconnect Simkl.");
   }
-  logLine("Refreshing Trakt token.");
-  const data = await refreshTraktToken(state.trakt.token.refresh_token);
+  logLine("Refreshing Simkl token.");
+  const data = await refreshSimklToken(state.simkl.token.refresh_token);
 
-  const clientId = state.trakt.clientId || "";
-  state.trakt.token = normalizeTraktToken(data);
-  state.trakt.clientId = clientId || normalizeTraktClientId(data.client_id || data.clientId);
+  const clientId = state.simkl.clientId || "";
+  state.simkl.token = normalizeSimklToken(data);
+  state.simkl.clientId = clientId || normalizeSimklClientId(data.client_id || data.clientId);
   saveState();
-  return state.trakt.token.access_token;
+  return state.simkl.token.access_token;
 }
 
-async function refreshTraktToken(refreshToken) {
-  const { data } = await requestJson(traktRefreshEndpoint(), {
+async function refreshSimklToken(refreshToken) {
+  const { data } = await requestJson(simklRefreshEndpoint(), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -585,13 +577,13 @@ async function refreshTraktToken(refreshToken) {
   return data;
 }
 
-async function traktRequest(path, params = {}, fetchOptions = {}) {
-  const accessToken = await ensureTraktAccessToken();
-  const apiKey = normalizeTraktClientId(state.trakt.clientId);
-  if (!apiKey) {
-    throw new Error("Reconnect Trakt. This authorization session is missing the app client id Trakt requires for API requests.");
+async function simklRequest(path, params = {}, fetchOptions = {}) {
+  const accessToken = await ensureSimklAccessToken();
+  const clientId = normalizeSimklClientId(state.simkl.clientId);
+  if (!clientId) {
+    throw new Error("Reconnect Simkl. This authorization session is missing the app client id Simkl requires for API requests.");
   }
-  const url = new URL(`${TRAKT_API}${path}`);
+  const url = new URL(`${SIMKL_API}${path}`);
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "") {
       url.searchParams.set(key, String(value));
@@ -602,19 +594,18 @@ async function traktRequest(path, params = {}, fetchOptions = {}) {
     ...fetchOptions,
     headers: {
       "Content-Type": "application/json",
-      "trakt-api-version": "2",
-      "trakt-api-key": apiKey,
       Authorization: `Bearer ${accessToken}`,
+      "simkl-api-key": clientId,
       ...(fetchOptions.headers || {}),
     },
   });
 }
 
-async function traktRequestWithTimeout(path, params = {}, timeoutMs = 2500) {
+async function simklRequestWithTimeout(path, params = {}, timeoutMs = 2500) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await traktRequest(path, params, { signal: controller.signal });
+    return await simklRequest(path, params, { signal: controller.signal });
   } finally {
     clearTimeout(timer);
   }
@@ -661,13 +652,13 @@ async function toggleNuvioConnection() {
   await loginNuvio();
 }
 
-async function toggleTraktConnection() {
-  if (state.trakt.token?.access_token) {
-    setButtonLabel(dom.startTraktLogin, "Disconnecting...");
-    disconnectTrakt();
+async function toggleSimklConnection() {
+  if (state.simkl.token?.access_token) {
+    setButtonLabel(dom.startSimklLogin, "Disconnecting...");
+    disconnectSimkl();
     return;
   }
-  await startTraktPopupLogin();
+  await startSimklPopupLogin();
 }
 
 async function ensureNuvioAccessToken() {
@@ -736,53 +727,97 @@ async function loadNuvioProfiles() {
   renderProfiles();
 }
 
-async function fetchAllTrakt(paths, params, label, options, fetchOptions = {}) {
+async function fetchAllSimkl(paths, params, label, options, fetchOptions = {}) {
   const errors = [];
   for (const path of paths) {
     try {
-      return await fetchAllTraktPath(path, params, label, options, fetchOptions);
+      return await fetchAllSimklPath(path, params, label, options, fetchOptions);
     } catch (error) {
       errors.push(error);
       if (![400, 404, 405].includes(error.status)) {
         throw error;
       }
-      logLine(`Trakt endpoint ${path} did not fit (${error.message}); trying fallback if available.`);
+      logLine(`Simkl endpoint ${path} did not fit (${error.message}); trying fallback if available.`);
     }
   }
   throw errors[errors.length - 1] || new Error(`Unable to fetch ${label}.`);
 }
 
-async function fetchAllTraktOptional(paths, params, label, options) {
+async function fetchAllSimklOptional(paths, params, label, options) {
   try {
-    return await fetchAllTrakt(paths, params, label, options);
+    return await fetchAllSimkl(paths, params, label, options);
   } catch (error) {
     logLine(`Skipping ${label}: ${error.message}`);
     return [];
   }
 }
 
-async function fetchAllTraktPath(path, params, label, options, fetchOptions = {}) {
-  if (fetchOptions.paged === false) {
-    const { data } = await traktRequest(path, params);
-    const batch = Array.isArray(data) ? data : data ? [data] : [];
+const SIMKL_NON_PAGINATED_PREFIXES = [
+  "/sync/all-items",
+  "/sync/playback",
+  "/sync/progress",
+];
+
+const SIMKL_WATCHED_STATUSES = {
+  movie: new Set(["completed"]),
+  show: new Set(["watching", "completed"]),
+  anime: new Set(["watching", "completed"]),
+};
+
+const SIMKL_LIBRARY_STATUSES = {
+  movie: new Set(["plantowatch", "completed"]),
+  show: new Set(["watching", "plantowatch", "completed", "hold"]),
+  anime: new Set(["watching", "plantowatch", "completed", "hold"]),
+};
+
+const SIMKL_SHOW_HISTORY_PARAMS = {
+  extended: "full",
+  episode_watched_at: "yes",
+  include_all_episodes: "original",
+};
+
+const SIMKL_ANIME_HISTORY_PARAMS = {
+  extended: "full_anime_seasons",
+  episode_watched_at: "yes",
+  include_all_episodes: "original",
+};
+
+function formatRemapTimeout(ms) {
+  if (ms >= 60000) return `${Math.round(ms / 60000)} min`;
+  return `${Math.round(ms / 1000)}s`;
+}
+
+function simklEndpointUsesPagination(path) {
+  return !SIMKL_NON_PAGINATED_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
+function filterSimklByStatus(items, statuses) {
+  return items.filter((item) => statuses.has(item.status));
+}
+
+async function fetchAllSimklPath(path, params, label, options, fetchOptions = {}) {
+  if (fetchOptions.paged === false || !simklEndpointUsesPagination(path)) {
+    const { data } = await simklRequest(path, params);
+    const batch = unwrapSimklResponse(data);
     logLine(`Pulled ${batch.length} ${label} from ${path}.`);
     return batch;
   }
 
   const limit = 1000;
   const configuredMaxPages = Number(options.maxPages);
+  const simklPageCap = 20;
   const maxPages = Number.isFinite(configuredMaxPages) && configuredMaxPages > 0
-    ? configuredMaxPages
-    : Number.POSITIVE_INFINITY;
+    ? Math.min(configuredMaxPages, simklPageCap)
+    : simklPageCap;
   const all = [];
 
   for (let page = 1; page <= maxPages; page += 1) {
-    const { data, headers } = await traktRequest(path, {
+    const { data, headers } = await simklRequest(path, {
       ...params,
       page,
       limit,
     });
-    const batch = Array.isArray(data) ? data : data ? [data] : [];
+    const batch = unwrapSimklResponse(data);
     all.push(...batch);
 
     const pageCount = Number(headers.get("x-pagination-page-count") || 0);
@@ -790,9 +825,24 @@ async function fetchAllTraktPath(path, params, label, options, fetchOptions = {}
 
     if (pageCount && page >= pageCount) break;
     if (batch.length < limit) break;
+    if (!pageCount) {
+      logLine(`Simkl did not return pagination headers for ${path}; stopping after page ${page}.`);
+      break;
+    }
   }
 
   return all;
+}
+
+function unwrapSimklResponse(data) {
+  if (Array.isArray(data)) return data;
+  if (data && typeof data === "object") {
+    // Simkl wraps responses in properties like "anime", "movies", "shows"
+    for (const key of ["anime", "movies", "shows", "items", "data"]) {
+      if (Array.isArray(data[key])) return data[key];
+    }
+  }
+  return data ? [data] : [];
 }
 
 async function nuvioRest(path, params = {}) {
@@ -831,19 +881,20 @@ async function prepareEpisodeMapper() {
   try {
     const context = await loadEpisodeMappingContext();
     if (!context.addons.length) {
-      logLine("No compatible Nuvio metadata addon was found, so episode remapping is skipped.");
+      logLine("No compatible Nuvio metadata addon was found (streaming addons are ignored), so episode remapping is skipped.");
       return null;
     }
     context.disabled = false;
     context.startedAt = 0;
     context.timeoutLogged = false;
     context.metaTimeoutMs = EPISODE_REMAP_META_TIMEOUT_MS;
-    context.traktTimeoutMs = EPISODE_REMAP_TRAKT_TIMEOUT_MS;
+    context.simklTimeoutMs = EPISODE_REMAP_SIMKL_TIMEOUT_MS;
     context.totalBudgetMs = EPISODE_REMAP_TOTAL_BUDGET_MS;
     context.fallbackStats = {};
-    context.fallbackLogCounts = {};
-    logLine(`Using Nuvio metadata addon for episode remapping: ${context.addons[0].name}.`);
-    logLine(`Episode remapping fallback guard: addon ${Math.round(context.metaTimeoutMs / 1000)}s, Trakt ${Math.round(context.traktTimeoutMs / 1000)}s, total ${Math.round(context.totalBudgetMs / 1000)}s.`);
+    context.fallbackShows = {};
+    const addonNames = context.addons.map((addon) => addon.name).join(", ");
+    logLine(`Using Nuvio metadata addon${context.addons.length === 1 ? "" : "s"} for episode remapping: ${addonNames}.`);
+    logLine(`Episode remapping fallback guard: addon ${formatRemapTimeout(context.metaTimeoutMs)}, Simkl ${formatRemapTimeout(context.simklTimeoutMs)}, total ${formatRemapTimeout(context.totalBudgetMs)}.`);
     return context;
   } catch (error) {
     logLine(`Episode remapping unavailable: ${error.message}`);
@@ -888,13 +939,14 @@ async function pullNuvioMetadataAddons(profileId) {
     .filter((row) => row?.url && row.enabled !== false)
     .sort((left, right) => Number(left.sort_order || 0) - Number(right.sort_order || 0));
 
+  const addons = [];
   for (const row of sortedRows) {
     const addon = await fetchAddonManifest(row.url, row.name).catch(() => null);
-    if (addon && addonHasMetaResource(addon)) {
-      return [addon];
+    if (addon && addonIsEligibleForEpisodeRemapping(addon)) {
+      addons.push(addon);
     }
   }
-  return [];
+  return addons;
 }
 
 async function fetchAddonManifest(addonUrl, fallbackName) {
@@ -989,6 +1041,14 @@ function addonHasMetaResource(addon) {
   return addon.resources.some((resource) => resource.name.toLowerCase() === "meta");
 }
 
+function addonHasStreamResource(addon) {
+  return addon.resources.some((resource) => resource.name.toLowerCase() === "stream");
+}
+
+function addonIsEligibleForEpisodeRemapping(addon) {
+  return addonHasMetaResource(addon) && !addonHasStreamResource(addon);
+}
+
 function addonSupportsMetaType(addon, type) {
   const normalizedType = String(type || "").trim().toLowerCase();
   if (!normalizedType) return false;
@@ -1058,14 +1118,16 @@ async function fetchMetaFromAddons(context, type, id) {
 
 async function fetchSeriesMeta(contentId, contentType, context) {
   const typeCandidates = unique([contentType, inferCanonicalMetaType(contentType), "series", "tv"]);
-  const idCandidates = unique([
+  const metaIdCandidates = unique([
     contentId,
+    barePrefixedId(contentId, "mal"),
+    barePrefixedId(contentId, "tvdb"),
     barePrefixedId(contentId, "tmdb"),
-    barePrefixedId(contentId, "trakt"),
+    barePrefixedId(contentId, "simkl"),
   ].filter(Boolean));
 
   for (const type of typeCandidates) {
-    for (const id of idCandidates) {
+    for (const id of metaIdCandidates) {
       const meta = await fetchMetaFromAddons(context, type, id);
       if (Array.isArray(meta?.videos) && meta.videos.length) {
         return meta;
@@ -1075,18 +1137,14 @@ async function fetchSeriesMeta(contentId, contentType, context) {
   return null;
 }
 
-async function getAddonEpisodes(contentId, contentType, context) {
+async function getAddonEpisodes(contentId, contentType, context, showLabel = "") {
   const cacheKey = `${context.effectiveProfileId}|${contentType}|${contentId}`;
   if (addonEpisodeCache.has(cacheKey)) return addonEpisodeCache.get(cacheKey);
   const meta = await fetchSeriesMeta(contentId, contentType, context);
   const episodes = mapAddonVideosToEpisodeEntries(meta?.videos || []);
   addonEpisodeCache.set(cacheKey, episodes);
   if (!episodes.length) {
-    noteEpisodeRemapFallback(
-      context,
-      "metadata",
-      `addon metadata was unavailable or timed out for ${contentId}; using Trakt numbering for that show.`,
-    );
+    noteEpisodeRemapFallback(context, "metadata", contentId, showLabel || contentId);
   }
   return episodes;
 }
@@ -1113,22 +1171,20 @@ function mapAddonVideosToEpisodeEntries(videos) {
     .sort(compareEpisodeEntries);
 }
 
-async function getTraktEpisodes(showLookupId, context) {
+async function getSimklEpisodes(showLookupId, context, showLabel = "") {
   if (!showLookupId) return [];
-  if (traktEpisodeCache.has(showLookupId)) return traktEpisodeCache.get(showLookupId);
+  if (simklEpisodeCache.has(showLookupId)) return simklEpisodeCache.get(showLookupId);
   let data = [];
   try {
-    const response = await traktRequestWithTimeout(`/shows/${encodeURIComponent(showLookupId)}/seasons`, {
-      extended: "episodes",
-    }, context?.traktTimeoutMs || EPISODE_REMAP_TRAKT_TIMEOUT_MS);
+    const response = await simklRequestWithTimeout(
+      `/shows/${encodeURIComponent(showLookupId)}/seasons`,
+      {},
+      context?.simklTimeoutMs || EPISODE_REMAP_SIMKL_TIMEOUT_MS,
+    );
     data = response.data;
   } catch {
-    noteEpisodeRemapFallback(
-      context,
-      "trakt",
-      `Trakt episode lookup was unavailable or timed out for ${showLookupId}; using Trakt numbering for that show.`,
-    );
-    traktEpisodeCache.set(showLookupId, []);
+    noteEpisodeRemapFallback(context, "simkl", showLookupId, showLabel || showLookupId);
+    simklEpisodeCache.set(showLookupId, []);
     return [];
   }
   const entries = [];
@@ -1147,7 +1203,7 @@ async function getTraktEpisodes(showLookupId, context) {
     }
   }
   entries.sort(compareEpisodeEntries);
-  traktEpisodeCache.set(showLookupId, entries);
+  simklEpisodeCache.set(showLookupId, entries);
   return entries;
 }
 
@@ -1166,38 +1222,53 @@ async function resolveImportedEpisodeMapping(context, params) {
 
   let mapped = null;
   try {
-    const addonEpisodes = await getAddonEpisodes(params.contentId, params.contentType, context);
-    if (!episodeMapperCanContinue(context)) return null;
-    const showLookupId = resolveShowLookupId(params.show?.ids, params.contentId);
-    const traktEpisodes = await getTraktEpisodes(showLookupId, context);
+    const addonEpisodes = await getAddonEpisodes(
+      params.contentId,
+      params.contentType,
+      context,
+      params.show?.title || params.contentId,
+    );
     if (!episodeMapperCanContinue(context)) return null;
 
-    let triedRemap = false;
-    if (addonEpisodes.length && traktEpisodes.length) {
-      const addonHasEpisode = addonEpisodes.some((item) => item.season === params.season && item.episode === params.episode);
-      if (!(addonHasEpisode && hasSameSeasonStructure(addonEpisodes, traktEpisodes))) {
-        triedRemap = true;
-        mapped = reverseRemapEpisodeByTitleOrIndex({
-          requestedSeason: params.season,
-          requestedEpisode: params.episode,
-          requestedTitle: params.episodeTitle,
-          addonEpisodes,
-          traktEpisodes,
-        });
-      }
+    const addonHasEpisode = addonEpisodes.some(
+      (item) => item.season === params.season && item.episode === params.episode,
+    );
+    if (!addonEpisodes.length || addonHasEpisode) {
+      episodeMappingCache.set(cacheKey, null);
+      return null;
     }
-    if (triedRemap && !mapped) {
+
+    const showLookupId = resolveShowLookupId(params.show?.ids, params.contentId);
+    const simklEpisodes = await getSimklEpisodes(
+      showLookupId,
+      context,
+      params.show?.title || params.contentId,
+    );
+    if (!episodeMapperCanContinue(context)) return null;
+
+    if (simklEpisodes.length) {
+      mapped = reverseRemapEpisodeByTitleOrIndex({
+        requestedSeason: params.season,
+        requestedEpisode: params.episode,
+        requestedTitle: params.episodeTitle,
+        addonEpisodes,
+        simklEpisodes,
+      });
+    }
+    if (!mapped) {
       noteEpisodeRemapFallback(
         context,
         "unmapped",
-        `no confident remap for ${params.show?.title || params.contentId} S${pad2(params.season)}E${pad2(params.episode)}; using Trakt numbering.`,
+        params.contentId,
+        params.show?.title || params.contentId,
       );
     }
   } catch {
     noteEpisodeRemapFallback(
       context,
       "error",
-      `unexpected remap error for ${params.show?.title || params.contentId} S${pad2(params.season)}E${pad2(params.episode)}; using Trakt numbering.`,
+      params.contentId,
+      params.show?.title || params.contentId,
     );
     mapped = null;
   }
@@ -1206,33 +1277,48 @@ async function resolveImportedEpisodeMapping(context, params) {
   return mapped;
 }
 
-function noteEpisodeRemapFallback(context, type, message) {
+function noteEpisodeRemapFallback(context, type, showKey, showTitle) {
   if (!context) return;
   context.fallbackStats ||= {};
-  context.fallbackLogCounts ||= {};
-  context.fallbackStats[type] = (context.fallbackStats[type] || 0) + 1;
-  context.fallbackLogCounts[type] = (context.fallbackLogCounts[type] || 0) + 1;
-
-  const count = context.fallbackLogCounts[type];
-  if (count <= EPISODE_REMAP_FALLBACK_LOG_LIMIT) {
-    logLine(`Episode remapping fallback: ${message}`);
+  context.fallbackShows ||= {};
+  if (!context.fallbackShows[type]) {
+    context.fallbackShows[type] = new Map();
   }
+  const key = String(showKey || showTitle || "unknown");
+  if (context.fallbackShows[type].has(key)) return;
+  context.fallbackShows[type].set(key, showTitle || showKey || "unknown");
+  context.fallbackStats[type] = (context.fallbackStats[type] || 0) + 1;
 }
 
 function logEpisodeRemapFallbackSummary(context) {
   const stats = context?.fallbackStats || {};
   const total = Object.values(stats).reduce((sum, value) => sum + Number(value || 0), 0);
   if (!total) return;
+
+  const showMaps = context?.fallbackShows || {};
+  const describeShows = (type) => {
+    const shows = showMaps[type];
+    if (!shows?.size) return "";
+    const titles = [...shows.values()].slice(0, 5);
+    const suffix = shows.size > titles.length ? ` (+${shows.size - titles.length} more)` : "";
+    return `: ${titles.join(", ")}${suffix}`;
+  };
+
   const parts = [
-    ["metadata", "addon metadata unavailable"],
-    ["trakt", "Trakt episode lookup unavailable"],
-    ["unmapped", "no confident remap"],
-    ["error", "remap errors"],
-    ["budget", "remapping time budget exceeded"],
+    ["metadata", "shows missing addon metadata"],
+    ["simkl", "shows with Simkl season lookup issues"],
+    ["unmapped", "shows without confident remap"],
+    ["error", "shows with remap errors"],
+    ["budget", "remap time budget hit"],
   ]
     .filter(([key]) => stats[key])
-    .map(([key, label]) => `${stats[key]} ${label}`);
-  logLine(`Episode remapping fallback summary: ${parts.join(", ")}. Affected items used original Trakt numbering.`);
+    .map(([key, label]) => {
+      if (key === "budget") return label;
+      const showCount = showMaps[key]?.size || stats[key];
+      return `${showCount} ${label}${describeShows(key)}`;
+    });
+
+  logLine(`Episode remapping notes: ${parts.join("; ")}. Affected shows kept Simkl numbering.`);
 }
 
 function episodeMapperCanContinue(context) {
@@ -1248,7 +1334,7 @@ function episodeMapperCanContinue(context) {
     context.timeoutLogged = true;
     context.fallbackStats ||= {};
     context.fallbackStats.budget = (context.fallbackStats.budget || 0) + 1;
-    logLine(`Episode remapping exceeded the ${Math.round(budgetMs / 1000)}s guard. Continuing this sync without remapping the remaining episodes.`);
+    logLine(`Episode remapping exceeded the ${formatRemapTimeout(budgetMs)} guard. Continuing this sync without remapping the remaining episodes.`);
   }
   return false;
 }
@@ -1258,14 +1344,14 @@ function reverseRemapEpisodeByTitleOrIndex({
   requestedEpisode,
   requestedTitle,
   addonEpisodes,
-  traktEpisodes,
+  simklEpisodes,
 }) {
   return remapEpisodeBetweenLists({
     requestedSeason,
     requestedEpisode,
     requestedTitle,
     requestedVideoId: null,
-    sourceEpisodes: traktEpisodes,
+    sourceEpisodes: simklEpisodes,
     targetEpisodes: addonEpisodes,
   });
 }
@@ -1325,36 +1411,23 @@ function isUsefulEpisodeTitle(title) {
   return !/^(episode|ep|e) \d+$/.test(title);
 }
 
-function hasSameSeasonStructure(leftEpisodes, rightEpisodes) {
-  const leftCounts = seasonEpisodeCounts(leftEpisodes);
-  const rightCounts = seasonEpisodeCounts(rightEpisodes);
-  if (leftCounts.size !== rightCounts.size) return false;
-  for (const [season, count] of leftCounts.entries()) {
-    if (rightCounts.get(season) !== count) return false;
-  }
-  return true;
-}
-
-function seasonEpisodeCounts(episodes) {
-  const counts = new Map();
-  for (const episode of episodes) {
-    counts.set(episode.season, (counts.get(episode.season) || 0) + 1);
-  }
-  return counts;
-}
 
 function resolveShowLookupId(ids, contentId) {
   const lookup = lookupFromIds(ids);
   if (lookup) return lookup;
   const parsed = parseContentId(contentId);
-  return parsed.imdb || parsed.trakt || parsed.slug || "";
+  return parsed.imdb || parsed.simkl || parsed.slug || "";
 }
 
 function lookupFromIds(ids) {
   if (!ids) return "";
-  if (typeof ids.imdb === "string" && /^tt\d+$/i.test(ids.imdb)) return ids.imdb;
-  if (ids.trakt !== undefined && ids.trakt !== null && String(ids.trakt).trim()) return String(ids.trakt);
+  // Prefer Simkl-native IDs for Simkl season lookups.
+  if (ids.simkl !== undefined && ids.simkl !== null && String(ids.simkl).trim()) return String(ids.simkl);
   if (typeof ids.slug === "string" && ids.slug.trim()) return ids.slug.trim();
+  const rawImdb = String(ids.imdb || "").trim();
+  if (/^tt\d+$/i.test(rawImdb)) return rawImdb;
+  if (/^\d+$/i.test(rawImdb)) return `tt${rawImdb}`;
+  if (ids.tmdb !== undefined && ids.tmdb !== null && String(ids.tmdb).trim()) return `tmdb:${ids.tmdb}`;
   return "";
 }
 
@@ -1363,10 +1436,12 @@ function parseContentId(value) {
   if (/^tt\d+$/i.test(text)) return { imdb: text };
   const imdbMatch = text.match(/^imdb:(tt\d+)$/i);
   if (imdbMatch) return { imdb: imdbMatch[1] };
-  const traktMatch = text.match(/^trakt:(?:show:|series:|tv:)?([0-9]+|[a-z0-9-]+)$/i);
-  if (traktMatch) {
-    return /^\d+$/.test(traktMatch[1]) ? { trakt: traktMatch[1] } : { slug: traktMatch[1] };
-  }
+  const simklMatch = text.match(/^simkl:([0-9]+)$/i);
+  if (simklMatch) return { simkl: simklMatch[1] };
+  const tmdbMatch = text.match(/^tmdb:([0-9]+)$/i);
+  if (tmdbMatch) return { tmdb: tmdbMatch[1] };
+  const malMatch = text.match(/^mal:([0-9]+)$/i);
+  if (malMatch) return { mal: malMatch[1] };
   return {};
 }
 
@@ -1380,7 +1455,74 @@ function unique(values) {
   return [...new Set(values.filter(Boolean).map((value) => String(value).trim()).filter(Boolean))];
 }
 
-async function pullTraktPlan(options) {
+function countSimklWatchedShows(sourceItems, isAnime) {
+  const watchedStatuses = isAnime ? SIMKL_WATCHED_STATUSES.anime : SIMKL_WATCHED_STATUSES.show;
+  let showCount = 0;
+  let episodeCount = 0;
+  for (const item of sourceItems) {
+    if (!watchedStatuses.has(item.status)) continue;
+    showCount += 1;
+    episodeCount += Number(item.watched_episodes_count) || 0;
+  }
+  return { showCount, episodeCount };
+}
+
+function countMappedShows(mappedEpisodes) {
+  const episodesByShow = new Map();
+  for (const item of mappedEpisodes) {
+    episodesByShow.set(item.content_id, (episodesByShow.get(item.content_id) || 0) + 1);
+  }
+  return {
+    showCount: episodesByShow.size,
+    episodeCount: mappedEpisodes.length,
+    episodesByShow,
+  };
+}
+
+function logWatchedShowSummary(label, sourceItems, mappedEpisodes, isAnime) {
+  const simkl = countSimklWatchedShows(sourceItems, isAnime);
+  const mapped = countMappedShows(mappedEpisodes);
+  logLine(
+    `Mapped ${mapped.showCount} ${label} (${mapped.episodeCount} watched episodes). `
+    + `Simkl reports ${simkl.showCount} ${label} with ${simkl.episodeCount} watched episodes.`,
+  );
+  if (isAnime && simkl.showCount !== mapped.showCount) {
+    logLine(`  ${simkl.showCount} Simkl anime entries map into ${mapped.showCount} unified Nuvio series IDs.`);
+  }
+
+  const watchedStatuses = isAnime ? SIMKL_WATCHED_STATUSES.anime : SIMKL_WATCHED_STATUSES.show;
+  const mappedBySimklKey = new Map();
+  for (const item of mappedEpisodes) {
+    const key = item._simkl_key || item.content_id;
+    mappedBySimklKey.set(key, (mappedBySimklKey.get(key) || 0) + 1);
+  }
+
+  let mismatches = 0;
+  for (const item of sourceItems) {
+    if (!watchedStatuses.has(item.status)) continue;
+    const show = item.show || item;
+    const expected = Number(item.watched_episodes_count) || 0;
+    if (!expected) continue;
+    const simklKey = String(show?.ids?.simkl || show?.title || "");
+    const actual = mappedBySimklKey.get(simklKey) || 0;
+    if (actual === expected) continue;
+    if (mismatches < 5) {
+      logLine(`  ${show.title || simklKey}: Simkl ${expected} watched, mapped ${actual}.`);
+    }
+    mismatches += 1;
+  }
+  if (mismatches > 5) {
+    logLine(`  ${mismatches - 5} more ${label} with episode count differences.`);
+  }
+}
+
+function logLibrarySummary(movies, shows, anime) {
+  if (movies.length) logLine(`Mapped ${movies.length} movie library items.`);
+  if (shows.length) logLine(`Mapped ${shows.length} TV show library items.`);
+  if (anime.length) logLine(`Mapped ${anime.length} anime library items.`);
+}
+
+async function pullSimklPlan(options) {
   const remaps = parseRemaps(options.idRemaps);
   const plan = {
     history: [],
@@ -1395,63 +1537,57 @@ async function pullTraktPlan(options) {
     : null;
 
   if (options.syncHistory) {
-    const [movies, shows] = await Promise.all([
-      fetchAllTrakt(["/users/me/watched/movies", "/sync/watched/movies"], { extended: "full" }, "watched movies", options, { paged: false }),
-      fetchAllTrakt(["/users/me/watched/shows", "/sync/watched/shows"], { extended: "full" }, "watched shows", options, { paged: false }),
+    const [movies, shows, anime] = await Promise.all([
+      fetchAllSimkl(["/sync/all-items/movies/completed"], {}, "completed movies", options),
+      fetchAllSimkl(["/sync/all-items/shows"], SIMKL_SHOW_HISTORY_PARAMS, "watched shows", options),
+      fetchAllSimkl(["/sync/all-items/anime"], SIMKL_ANIME_HISTORY_PARAMS, "anime watched items", options),
     ]);
-    plan.history.push(...mapWatchedMovies(movies, remaps, plan));
-    plan.history.push(...(await mapWatchedShows(shows, remaps, plan, episodeMapper)));
+
+    const mappedMovies = mapWatchedMovies(movies, remaps, plan);
+    const mappedShows = await mapWatchedShows(shows, remaps, plan, episodeMapper, false);
+    const mappedAnime = await mapWatchedShows(anime, remaps, plan, episodeMapper, true);
+
+    plan.history.push(...mappedMovies, ...mappedShows, ...mappedAnime);
     plan.history = dedupeBy(plan.history, watchedKey, "watched_at");
-    logLine(`Mapped ${plan.history.length} watched items for Nuvio.`);
+
+    logLine(`Mapped ${mappedMovies.length} completed movies.`);
+    logWatchedShowSummary("TV shows", shows, mappedShows, false);
+    logWatchedShowSummary("anime", anime, mappedAnime, true);
+    logLine(`Total watched history: ${plan.history.length} items for Nuvio.`);
   }
 
   if (options.syncProgress) {
-    let playbackMovies = await fetchAllTraktOptional(["/sync/playback/movies"], { extended: "full" }, "movie progress", options);
-    let playbackEpisodes = await fetchAllTraktOptional(["/sync/playback/episodes"], { extended: "full" }, "episode progress", options);
+    const progress = await fetchAllSimklOptional(["/sync/playback"], {}, "playback progress", options);
+    const movies = progress.filter((item) => item.type === "movie");
+    const episodes = progress.filter((item) => item.type === "episode");
 
-    if (!playbackMovies.length || !playbackEpisodes.length) {
-      const allPlayback = await fetchAllTraktOptional(["/sync/playback"], { extended: "full" }, "playback progress", options);
-      if (!playbackMovies.length) playbackMovies = allPlayback.filter((item) => item.type === "movie" || item.movie);
-      if (!playbackEpisodes.length) playbackEpisodes = allPlayback.filter((item) => item.type === "episode" || item.episode);
-    }
-
-    plan.progress.push(...(await mapPlayback(playbackMovies, "movie", remaps, plan, options, episodeMapper)));
-    plan.progress.push(...(await mapPlayback(playbackEpisodes, "episode", remaps, plan, options, episodeMapper)));
+    plan.progress.push(...(await mapPlayback(movies, "movie", remaps, plan, options, episodeMapper)));
+    plan.progress.push(...(await mapPlayback(episodes, "episode", remaps, plan, options, episodeMapper)));
     plan.progress = dedupeBy(plan.progress, progressKey, "last_watched");
     logLine(`Mapped ${plan.progress.length} continue-watching entries for Nuvio.`);
   }
 
   if (options.syncWatchlist) {
-    const [movies, shows] = await Promise.all([
-      fetchAllTrakt(
-        ["/users/me/watchlist/movies/added", "/users/me/watchlist/movies"],
-        { extended: "full" },
-        "watchlist movies",
-        options,
-      ),
-      fetchAllTrakt(
-        ["/users/me/watchlist/shows/added", "/users/me/watchlist/shows"],
-        { extended: "full" },
-        "watchlist shows",
-        options,
-      ),
+    const [movies, shows, anime] = await Promise.all([
+      fetchAllSimkl(["/sync/all-items/movies"], {}, "movie library items", options),
+      fetchAllSimkl(["/sync/all-items/shows"], {}, "show library items", options),
+      fetchAllSimkl(["/sync/all-items/anime"], {}, "anime library items", options),
     ]);
-    plan.library.push(...mapLibraryItems(movies, "watchlist", "movie", remaps, plan));
-    plan.library.push(...mapLibraryItems(shows, "watchlist", "show", remaps, plan));
-  }
 
-  if (options.syncCollection) {
-    const [movies, shows] = await Promise.all([
-      fetchAllTrakt(["/sync/collection/movies"], { extended: "full" }, "collection movies", options),
-      fetchAllTrakt(["/sync/collection/shows"], { extended: "full" }, "collection shows", options, { paged: false }),
-    ]);
-    plan.library.push(...mapLibraryItems(movies, "collection", "movie", remaps, plan));
-    plan.library.push(...mapLibraryItems(shows, "collection", "show", remaps, plan));
+    const movieLibrary = mapLibraryItems(filterSimklByStatus(movies, SIMKL_LIBRARY_STATUSES.movie), "watchlist", "movie", remaps, plan);
+    const showLibrary = mapLibraryItems(filterSimklByStatus(shows, SIMKL_LIBRARY_STATUSES.show), "watchlist", "show", remaps, plan);
+    const animeLibrary = mapLibraryItems(filterSimklByStatus(anime, SIMKL_LIBRARY_STATUSES.anime), "watchlist", "anime", remaps, plan);
+
+    plan.library.push(...movieLibrary, ...showLibrary, ...animeLibrary);
   }
 
   plan.library = dedupeBy(plan.library, (item) => item.content_id, "added_at");
   if (plan.library.length) {
-    logLine(`Mapped ${plan.library.length} library items. Existing Nuvio library will be merged before full replace.`);
+    const libraryMovies = plan.library.filter((item) => item.content_type === "movie");
+    const libraryShows = plan.library.filter((item) => item.content_type === "series");
+    const libraryAnime = plan.library.filter((item) => item.content_type === "anime");
+    logLibrarySummary(libraryMovies, libraryShows, libraryAnime);
+    logLine(`Total library items: ${plan.library.length}. Existing Nuvio library will be merged before full replace.`);
   }
   if (plan.skipped.length) {
     logLine(`Skipped ${plan.skipped.length} items that could not be mapped safely.`);
@@ -1470,66 +1606,105 @@ async function pullTraktPlan(options) {
 function mapWatchedMovies(items, remaps, plan) {
   const mapped = [];
   for (const item of items) {
+    // Simkl /sync/all-items/movies returns { movie: { title, ids: {...} }, last_watched_at, ... }
     const movie = item.movie || item;
-    const id = resolveContentId(movie?.ids, "movie", remaps, plan);
-    if (!id) {
-      skip(plan, movie?.title || "movie", "missing movie ID");
+    if (!movie || !movie.ids) {
+      skip(plan, movie?.title || "movie", "missing movie or IDs");
       continue;
     }
-    mapped.push({
-      content_id: id.value,
-      content_type: "movie",
-      title: movie.title || "Untitled movie",
-      watched_at: toEpochMs(item.last_watched_at || item.watched_at || item.last_updated_at),
-    });
+    const id = resolveContentId(movie.ids, "movie", remaps, plan);
+    if (!id) {
+      skip(plan, movie.title || "movie", "missing movie ID");
+      continue;
+    }
+    // Only include completed items (watched)
+    if (item.status === "completed") {
+      mapped.push({
+        content_id: id.value,
+        content_type: "movie",
+        title: movie.title || "Untitled movie",
+        watched_at: toEpochMs(item.last_watched_at || item.last_updated_at),
+      });
+    }
   }
   return mapped;
 }
 
-async function mapWatchedShows(items, remaps, plan, episodeMapper) {
+async function mapWatchedShows(items, remaps, plan, episodeMapper, isAnime = false) {
   const mapped = [];
-  for (const record of items) {
-    const show = record.show || record;
-    const id = resolveContentId(show?.ids, "show", remaps, plan);
+  const watchedStatuses = isAnime ? SIMKL_WATCHED_STATUSES.anime : SIMKL_WATCHED_STATUSES.show;
+  for (const item of items) {
+    if (!watchedStatuses.has(item.status)) continue;
+    const show = item.show || item;
+    if (!show || !show.ids) {
+      skip(plan, show?.title || "show", "missing show or IDs");
+      continue;
+    }
+    const standaloneAnime = isAnime && isStandaloneSimklAnime(item.anime_type);
+    const id = resolveContentId(show.ids, isAnime ? "anime" : "show", remaps, plan, { animeType: item.anime_type });
     if (!id) {
-      skip(plan, show?.title || "show", "missing show ID");
+      skip(plan, show.title || "show", "missing show ID");
       continue;
     }
 
-    for (const season of record.seasons || []) {
-      for (const episode of season.episodes || []) {
-        const seasonNumber = asNumber(season.number);
-        const episodeNumber = asNumber(episode.number);
-        if (seasonNumber === null || episodeNumber === null) {
-          skip(plan, show?.title || id.value, "missing season or episode number");
-          continue;
+    // Process watched episodes from seasons structure
+    if (item.seasons && Array.isArray(item.seasons)) {
+      for (const season of item.seasons) {
+        if (!Array.isArray(season.episodes)) continue;
+        for (const episode of season.episodes) {
+          if (!episode.watched_at && !episode.last_watched_at) continue;
+          const localSeason = asNumber(season.number);
+          const localEpisode = asNumber(episode.number ?? episode.episode);
+          if (localSeason === null || localEpisode === null) {
+            skip(plan, show.title || id.value, "missing season or episode number");
+            continue;
+          }
+
+          const episodeTitle = episode.title || null;
+          const animeCoords = isAnime ? resolveSimklAnimeEpisodeCoords(item, season, episode) : null;
+          let targetSeason = localSeason;
+          let targetEpisode = localEpisode;
+          let targetTitle = episodeTitle;
+          let wasRemapped = false;
+
+          if (animeCoords && animeCoords.source !== "simkl") {
+            targetSeason = animeCoords.season;
+            targetEpisode = animeCoords.episode;
+            wasRemapped = targetSeason !== localSeason || targetEpisode !== localEpisode;
+          } else if (!standaloneAnime && episodeMapper) {
+            const remapped = await resolveImportedEpisodeMapping(episodeMapper, {
+              contentId: id.value,
+              contentType: isAnime ? "anime" : "series",
+              show,
+              season: localSeason,
+              episode: localEpisode,
+              episodeTitle,
+            });
+            if (remapped) {
+              targetSeason = remapped.season;
+              targetEpisode = remapped.episode;
+              targetTitle = remapped.title || episodeTitle;
+              wasRemapped = targetSeason !== localSeason || targetEpisode !== localEpisode;
+            }
+          }
+
+          if (wasRemapped) plan.remappedEpisodes += 1;
+          mapped.push({
+            content_id: id.value,
+            content_type: isAnime ? "anime" : "series",
+            title: targetTitle
+              ? `${show.title || (isAnime ? "Anime" : "Series")} - ${targetTitle}`
+              : `${show.title || (isAnime ? "Anime" : "Series")} S${pad2(targetSeason)}E${pad2(targetEpisode)}`,
+            season: targetSeason,
+            episode: targetEpisode,
+            watched_at: toEpochMs(episode.watched_at || episode.last_watched_at || item.last_updated_at),
+            _remapped_from: wasRemapped ? `S${pad2(localSeason)}E${pad2(localEpisode)}` : null,
+            _simkl_key: String(show.ids?.simkl || show.title || id.value),
+          });
         }
-        const episodeTitle = episode.title || episode.name || null;
-        const remapped = await resolveImportedEpisodeMapping(episodeMapper, {
-          contentId: id.value,
-          contentType: "series",
-          show,
-          season: seasonNumber,
-          episode: episodeNumber,
-          episodeTitle,
-        });
-        const targetSeason = remapped?.season ?? seasonNumber;
-        const targetEpisode = remapped?.episode ?? episodeNumber;
-        const targetTitle = remapped?.title || episodeTitle;
-        const wasRemapped = targetSeason !== seasonNumber || targetEpisode !== episodeNumber;
-        if (wasRemapped) plan.remappedEpisodes += 1;
-        mapped.push({
-          content_id: id.value,
-          content_type: "series",
-          title: targetTitle
-            ? `${show.title || "Series"} - ${targetTitle}`
-            : `${show.title || "Series"} S${pad2(targetSeason)}E${pad2(targetEpisode)}`,
-          season: targetSeason,
-          episode: targetEpisode,
-          watched_at: toEpochMs(episode.last_watched_at || record.last_watched_at || record.last_updated_at),
-          _remapped_from: wasRemapped ? `S${pad2(seasonNumber)}E${pad2(episodeNumber)}` : null,
-        });
       }
+    } else if (Number(item.watched_episodes_count) > 0) {
+      skip(plan, show.title || id.value, "missing per-episode watch data from Simkl");
     }
   }
   return mapped;
@@ -1548,13 +1723,15 @@ async function mapPlayback(items, forcedType, remaps, plan, options, episodeMapp
     }
 
     if (type === "movie" || entry.movie) {
-      const movie = entry.movie;
+      // Movie progress
+      const movie = entry.movie || entry;
       const id = resolveContentId(movie?.ids, "movie", remaps, plan);
       if (!id) {
         skip(plan, movie?.title || "movie progress", "missing movie ID");
         continue;
       }
-      const duration = durationMs(movie?.runtime, options.estimateDuration ? 90 : 0);
+      const runtime = movie?.runtime || (options.estimateDuration ? 90 : 0);
+      const duration = durationMs(runtime, 0);
       if (!duration) {
         skip(plan, movie?.title || id.value, "missing movie runtime");
         continue;
@@ -1565,27 +1742,30 @@ async function mapPlayback(items, forcedType, remaps, plan, options, episodeMapp
         video_id: id.value,
         position: clamp(Math.round(duration * (progress / 100)), 1, Math.max(1, duration - 1000)),
         duration,
-        last_watched: toEpochMs(entry.paused_at || entry.watched_at || entry.updated_at),
+        last_watched: toEpochMs(entry.last_watched_at || entry.paused_at || entry.watched_at || entry.updated_at),
         _title: movie?.title || id.value,
       });
       continue;
     }
 
-    const episode = entry.episode;
-    const show = entry.show;
+    // Episode progress
+    const show = entry.show || entry;
     const id = resolveContentId(show?.ids, "show", remaps, plan);
-    const seasonNumber = asNumber(episode?.season);
-    const episodeNumber = asNumber(episode?.number);
+    const seasonNumber = asNumber(entry.season !== undefined ? entry.season : entry.episode?.season);
+    const episodeNumber = asNumber(
+      entry.number !== undefined ? entry.number : entry.episode?.number ?? entry.episode?.episode,
+    );
     if (!id || seasonNumber === null || episodeNumber === null) {
-      skip(plan, show?.title || episode?.title || "episode progress", "missing show ID or episode number");
+      skip(plan, show?.title || entry.episode?.title || "episode progress", "missing show ID or episode number");
       continue;
     }
-    const duration = durationMs(episode?.runtime || show?.runtime, options.estimateDuration ? 45 : 0);
+    const runtime = entry.runtime || show?.runtime || (options.estimateDuration ? 45 : 0);
+    const duration = durationMs(runtime, 0);
     if (!duration) {
-      skip(plan, episode?.title || id.value, "missing episode runtime");
+      skip(plan, entry.episode?.title || entry.title || id.value, "missing episode runtime");
       continue;
     }
-    const episodeTitle = episode?.title || episode?.name || null;
+    const episodeTitle = entry.title || entry.episode?.title || null;
     const remapped = await resolveImportedEpisodeMapping(episodeMapper, {
       contentId: id.value,
       contentType: "series",
@@ -1621,14 +1801,16 @@ function mapLibraryItems(items, source, contentKind, remaps, plan) {
   const mapped = [];
   for (const item of items) {
     const media = contentKind === "movie" ? item.movie || item : item.show || item;
-    const id = resolveContentId(media?.ids, contentKind, remaps, plan);
+    const id = resolveContentId(media?.ids, contentKind, remaps, plan, {
+      animeType: contentKind === "anime" ? item.anime_type : undefined,
+    });
     if (!id) {
       skip(plan, media?.title || source, `missing ${contentKind} ID`);
       continue;
     }
     mapped.push({
       content_id: id.value,
-      content_type: contentKind === "movie" ? "movie" : "series",
+      content_type: contentKind === "movie" ? "movie" : contentKind === "anime" ? "anime" : "series",
       name: media.title || "Untitled",
       poster: null,
       poster_shape: "POSTER",
@@ -1637,7 +1819,7 @@ function mapLibraryItems(items, source, contentKind, remaps, plan) {
       release_info: media.year ? String(media.year) : null,
       imdb_rating: typeof media.rating === "number" ? media.rating : null,
       genres: Array.isArray(media.genres) ? media.genres : [],
-      addon_base_url: "https://trakt.tv",
+      addon_base_url: "https://simkl.com",
       added_at: toEpochMs(item.listed_at || item.collected_at || item.updated_at),
       _source: source,
     });
@@ -1645,8 +1827,38 @@ function mapLibraryItems(items, source, contentKind, remaps, plan) {
   return mapped;
 }
 
-function resolveContentId(ids, kind, remaps, plan) {
-  const candidates = idCandidates(ids, kind);
+function isStandaloneSimklAnime(animeType) {
+  return ["movie", "ova", "ona", "special", "music video"].includes(String(animeType || "").toLowerCase());
+}
+
+function resolveSimklAnimeEpisodeCoords(simklItem, season, episode) {
+  const localSeason = asNumber(season?.number);
+  const localEpisode = asNumber(episode?.number ?? episode?.episode);
+  if (localSeason === null || localEpisode === null) return null;
+
+  const tvdbSeason = asNumber(episode?.tvdb?.season);
+  const tvdbEpisode = asNumber(episode?.tvdb?.episode ?? episode?.tvdb?.number);
+  if (tvdbSeason !== null && tvdbEpisode !== null) {
+    return { season: tvdbSeason, episode: tvdbEpisode, source: "tvdb" };
+  }
+
+  const mappedSeasons = Array.isArray(simklItem?.mapped_tvdb_seasons)
+    ? simklItem.mapped_tvdb_seasons
+      .map((value) => asNumber(value))
+      .filter((value) => value !== null && value > 0)
+    : [];
+  if (mappedSeasons.length === 1 && localSeason === 1) {
+    return { season: mappedSeasons[0], episode: localEpisode, source: "mapped_tvdb_seasons" };
+  }
+  if (mappedSeasons.length > 1 && localSeason >= 1 && localSeason <= mappedSeasons.length) {
+    return { season: mappedSeasons[localSeason - 1], episode: localEpisode, source: "mapped_tvdb_seasons" };
+  }
+
+  return { season: localSeason, episode: localEpisode, source: "simkl" };
+}
+
+function resolveContentId(ids, kind, remaps, plan, options = {}) {
+  const candidates = idCandidates(ids, kind, options);
   for (const candidate of candidates) {
     for (const key of [candidate.value, ...(candidate.remapKeys || [])]) {
       if (remaps[key]) {
@@ -1660,11 +1872,34 @@ function resolveContentId(ids, kind, remaps, plan) {
   return selected;
 }
 
-function idCandidates(ids = {}, kind) {
+function idCandidates(ids = {}, kind, options = {}) {
   const list = [];
-  // Match Nuvio's own Trakt import order: IMDb, then TMDB, then numeric Trakt.
-  const imdb = String(ids.imdb || "").trim();
-  if (/^tt\d+$/i.test(imdb)) {
+  const standaloneAnime = kind === "anime" && isStandaloneSimklAnime(options.animeType);
+
+  if (kind === "anime") {
+    if (!standaloneAnime && ids.tvdb) {
+      list.push({
+        value: `tvdb:${ids.tvdb}`,
+        fallback: false,
+        remapKeys: [`tvdb:${ids.tvdb}`],
+      });
+    }
+    if (ids.mal) {
+      list.push({
+        value: `mal:${ids.mal}`,
+        fallback: false,
+        remapKeys: [`mal:${ids.mal}`],
+      });
+    }
+  }
+
+  const rawImdb = String(ids.imdb || "").trim();
+  const imdb = /^tt\d+$/i.test(rawImdb)
+    ? rawImdb
+    : /^\d+$/i.test(rawImdb)
+      ? `tt${rawImdb}`
+      : "";
+  if (imdb) {
     list.push({
       value: imdb,
       fallback: false,
@@ -1674,18 +1909,22 @@ function idCandidates(ids = {}, kind) {
   if (ids.tmdb) {
     list.push({ value: `tmdb:${ids.tmdb}`, fallback: false });
   }
-  if (ids.trakt) {
+  if (kind !== "anime" && ids.mal) {
     list.push({
-      value: `trakt:${ids.trakt}`,
-      fallback: true,
-      remapKeys: [`trakt:${kind}:${ids.trakt}`],
+      value: `mal:${ids.mal}`,
+      fallback: false,
+      remapKeys: [`mal:${ids.mal}`],
     });
   }
-  if (ids.tvdb) {
-    list.push({ value: `tvdb:${ids.tvdb}`, fallback: true, usable: false });
+  if (ids.simkl) {
+    list.push({
+      value: `simkl:${ids.simkl}`,
+      fallback: true,
+      remapKeys: [`simkl:${kind}:${ids.simkl}`],
+    });
   }
-  if (ids.slug) {
-    list.push({ value: `trakt:${kind}:${ids.slug}`, fallback: true, usable: false });
+  if (ids.tvdb && kind !== "anime") {
+    list.push({ value: `tvdb:${ids.tvdb}`, fallback: true, usable: false });
   }
   return list;
 }
@@ -1814,7 +2053,7 @@ async function previewSync() {
   const options = readOptions();
   validateSyncInputs(options, false);
   logLine("Preview pull started.");
-  lastPlan = await pullTraktPlan(options);
+  lastPlan = await pullSimklPlan(options);
   updateStats(lastPlan);
   renderPreview(lastPlan, 1);
   logLine("Preview complete. Nothing was pushed.");
@@ -1826,7 +2065,7 @@ async function runSync() {
   const options = readOptions();
   validateSyncInputs(options, true);
   logLine("Sync started.");
-  lastPlan = await pullTraktPlan(options);
+  lastPlan = await pullSimklPlan(options);
   updateStats(lastPlan);
   renderPreview(lastPlan, 1);
   await pushPlanToNuvio(lastPlan);
@@ -1835,8 +2074,8 @@ async function runSync() {
 }
 
 function validateSyncInputs(options, requireNuvio) {
-  if (!state.trakt.token?.access_token) {
-    throw new Error("Connect Trakt before pulling data.");
+  if (!state.simkl.token?.access_token) {
+    throw new Error("Connect Simkl before pulling data.");
   }
   if (requireNuvio && !state.nuvio.session?.access_token) {
     throw new Error("Connect Nuvio before syncing.");
@@ -1931,14 +2170,14 @@ function cryptoRandomString() {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function normalizeTraktClientId(value) {
+function normalizeSimklClientId(value) {
   const clientId = String(value || "").trim();
   return /^[a-f0-9]{64}$/i.test(clientId) ? clientId : "";
 }
 
-function extractTraktClientIdFromUrl(value) {
+function extractSimklClientIdFromUrl(value) {
   try {
-    return normalizeTraktClientId(new URL(value).searchParams.get("client_id"));
+    return normalizeSimklClientId(new URL(value).searchParams.get("client_id"));
   } catch {
     return "";
   }
@@ -1953,14 +2192,14 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-function disconnectTrakt() {
-  state.trakt.token = null;
-  state.trakt.clientId = "";
-  pendingTraktState = null;
-  pendingTraktClientId = "";
+function disconnectSimkl() {
+  state.simkl.token = null;
+  state.simkl.clientId = "";
+  pendingSimklState = null;
+  pendingSimklClientId = "";
   saveState();
   updateAuthStatus();
-  logLine("Trakt disconnected locally.");
+  logLine("Simkl disconnected locally.");
 }
 
 async function disconnectNuvio() {
@@ -2000,7 +2239,7 @@ function bind(action, handler, busyLabel = "", successLabel = "") {
       logLine(`Error: ${error.message}`);
       toast(error.message);
     } finally {
-      if (!(action === dom.startTraktLogin && traktPending)) {
+      if (!(action === dom.startSimklLogin && simklPending)) {
         restoreButtonLabel(action);
       }
       setBusy(false);
@@ -2012,12 +2251,10 @@ function bind(action, handler, busyLabel = "", successLabel = "") {
   });
 }
 
-bind(dom.startTraktLogin, toggleTraktConnection);
+bind(dom.startSimklLogin, toggleSimklConnection);
 bind(dom.loginNuvio, toggleNuvioConnection);
 bind(dom.previewSync, previewSync, "Loading preview...", "Preview ready");
 bind(dom.runSync, runSync, "Syncing...", "Synced");
-bind(dom.logoutTrakt, disconnectTrakt);
-bind(dom.logoutNuvio, disconnectNuvio);
 
 dom.copyLog.addEventListener("click", async () => {
   await navigator.clipboard.writeText(dom.log.textContent);
@@ -2045,17 +2282,17 @@ if (dom.previewNext) {
 window.addEventListener("online", () => toast("Network is back."));
 window.addEventListener("offline", () => toast("You appear to be offline."));
 window.addEventListener("message", (event) => {
-  handleTraktOauthPayload(event.data, event.origin || "");
+  handleSimklOauthPayload(event.data, event.origin || "");
 });
 if ("BroadcastChannel" in window) {
-  traktBroadcastChannel = new BroadcastChannel("nuvio-trakt-bridge.trakt-oauth");
-  traktBroadcastChannel.addEventListener("message", (event) => {
-    handleTraktOauthPayload(event.data, "");
+  simklBroadcastChannel = new BroadcastChannel("nuvio-simkl-bridge.simkl-oauth");
+  simklBroadcastChannel.addEventListener("message", (event) => {
+    handleSimklOauthPayload(event.data, "");
   });
 }
 window.addEventListener("beforeunload", () => {
-  if (traktBroadcastChannel) {
-    traktBroadcastChannel.close();
+  if (simklBroadcastChannel) {
+    simklBroadcastChannel.close();
   }
 });
 
