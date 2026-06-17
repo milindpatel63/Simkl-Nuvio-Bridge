@@ -2,6 +2,8 @@
 
 Standalone static web tool for importing Simkl watched history, playback progress, and watchlist data into Nuvio Sync. Perfect for movies, TV shows, and anime with per-episode tracking.
 
+![Nuvio Simkl Bridge](./assets/simkl-to-nuvio.png)
+
 ## Quick Start
 
 ### Prerequisites
