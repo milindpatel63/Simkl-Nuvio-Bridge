@@ -333,13 +333,18 @@ summary:focus-visible {
 
 .connector-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: end;
+  grid-template-columns: 1fr;
+  align-items: stretch;
   gap: 12px;
 }
 
 .connector-actions .button-row {
   justify-content: flex-start;
+}
+
+.connector-selects {
+  display: grid;
+  gap: 12px;
 }
 
 .profile-field {

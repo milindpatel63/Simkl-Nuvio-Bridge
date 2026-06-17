@@ -65,12 +65,20 @@
               <div class="button-row">
                 <button id="login-nuvio" class="button button--light" type="button">Sign In</button>
               </div>
-              <label class="profile-field">
-                Nuvio profile
-                <select id="profile-select">
-                  <option value="1">Profile 1</option>
-                </select>
-              </label>
+              <div class="connector-selects">
+                <label class="profile-field">
+                  Nuvio profile
+                  <select id="profile-select">
+                    <option value="1">Profile 1</option>
+                  </select>
+                </label>
+                <label id="metadata-addon-field" class="profile-field">
+                  Metadata addon
+                  <select id="metadata-addon-select" disabled>
+                    <option value="">Sign in to load addons</option>
+                  </select>
+                </label>
+              </div>
             </div>
           </article>
         </section>

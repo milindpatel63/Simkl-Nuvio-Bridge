@@ -19,6 +19,8 @@ const dom = {
   loginNuvio: $("#login-nuvio"),
   logoutNuvio: $("#logout-nuvio"),
   profileSelect: $("#profile-select"),
+  metadataAddonField: $("#metadata-addon-field"),
+  metadataAddonSelect: $("#metadata-addon-select"),
   syncHistory: $("#sync-history"),
   syncProgress: $("#sync-progress"),
   syncWatchlist: $("#sync-watchlist"),
@@ -52,6 +54,7 @@ const PREVIEW_PAGE_SIZE = 50;
 const EPISODE_REMAP_META_TIMEOUT_MS = 15000;
 const EPISODE_REMAP_SIMKL_TIMEOUT_MS = 15000;
 const EPISODE_REMAP_TOTAL_BUDGET_MS = 30 * 60 * 1000;
+const LIBRARY_META_ENRICH_CONCURRENCY = 5;
 let episodeMappingContextPromise = null;
 let episodeMappingContextKey = "";
 const addonManifestCache = new Map();
@@ -71,6 +74,8 @@ function defaultState() {
       session: null,
       profiles: [],
       profileId: 1,
+      metadataAddons: [],
+      metadataAddonUrl: "",
     },
     options: {
       syncHistory: true,
@@ -110,6 +115,7 @@ function hydrateForm() {
   dom.syncWatchlist.checked = Boolean(state.options.syncWatchlist);
   dom.syncCollection.checked = Boolean(state.options.syncCollection);
   renderProfiles();
+  renderMetadataAddons();
   updateAuthStatus();
   clearLog();
   logLine("Ready. Connect Simkl and Nuvio, then preview before syncing.");
@@ -127,6 +133,9 @@ function readOptions() {
     idRemaps: "",
   };
   state.nuvio.profileId = Number(dom.profileSelect.value || state.nuvio.profileId || 1);
+  state.nuvio.metadataAddonUrl = canonicalizeAddonUrl(
+    dom.metadataAddonSelect?.value || state.nuvio.metadataAddonUrl || "",
+  );
   saveState();
   return state.options;
 }
@@ -199,6 +208,60 @@ function renderProfiles() {
       return `<option value="${id}" ${selected}>${label}</option>`;
     })
     .join("");
+}
+
+function getEffectiveNuvioProfileId(profileId = Number(state.nuvio.profileId || 1)) {
+  const profile = state.nuvio.profiles.find((item) => Number(item.profile_index || item.id || 1) === profileId);
+  return profileId !== 1 && profile?.uses_primary_addons ? 1 : profileId;
+}
+
+function getSelectedMetadataAddonUrl() {
+  const fromDom = canonicalizeAddonUrl(dom.metadataAddonSelect?.value || "");
+  if (fromDom) return fromDom;
+  return canonicalizeAddonUrl(state.nuvio.metadataAddonUrl || "");
+}
+
+function getSelectedMetadataAddonName() {
+  const selectedUrl = getSelectedMetadataAddonUrl();
+  const match = (state.nuvio.metadataAddons || []).find((addon) => addon.baseUrl === selectedUrl);
+  return match?.name || selectedUrl || "metadata addon";
+}
+
+function renderMetadataAddons() {
+  if (!dom.metadataAddonSelect) return;
+
+  const connected = Boolean(state.nuvio.session?.access_token);
+  const addons = state.nuvio.metadataAddons || [];
+
+  if (!connected) {
+    dom.metadataAddonSelect.innerHTML = '<option value="">Sign in to load addons</option>';
+    dom.metadataAddonSelect.disabled = true;
+    return;
+  }
+
+  if (!addons.length) {
+    dom.metadataAddonSelect.innerHTML = '<option value="">No metadata addons on this profile</option>';
+    dom.metadataAddonSelect.disabled = true;
+    return;
+  }
+
+  const selectedUrl = getSelectedMetadataAddonUrl() || addons[0].baseUrl;
+  dom.metadataAddonSelect.innerHTML = addons
+    .map((addon) => {
+      const selected = addon.baseUrl === selectedUrl ? "selected" : "";
+      return `<option value="${escapeHtml(addon.baseUrl)}" ${selected}>${escapeHtml(addon.name)}</option>`;
+    })
+    .join("");
+
+  state.nuvio.metadataAddonUrl = selectedUrl;
+  dom.metadataAddonSelect.disabled = addons.length <= 1;
+}
+
+function filterMetadataAddonsBySelection(addons) {
+  const selectedUrl = getSelectedMetadataAddonUrl();
+  if (!selectedUrl) return addons;
+  const filtered = addons.filter((addon) => addon.baseUrl === selectedUrl);
+  return filtered.length ? filtered : addons;
 }
 
 function setBusy(isBusy) {
@@ -725,6 +788,41 @@ async function loadNuvioProfiles() {
   }
   saveState();
   renderProfiles();
+  await loadNuvioMetadataAddons();
+}
+
+async function loadNuvioMetadataAddons() {
+  if (!state.nuvio.session?.access_token) {
+    state.nuvio.metadataAddons = [];
+    state.nuvio.metadataAddonUrl = "";
+    renderMetadataAddons();
+    return;
+  }
+
+  clearEpisodeMappingCaches();
+  const effectiveProfileId = getEffectiveNuvioProfileId();
+  const addons = await pullNuvioMetadataAddons(effectiveProfileId);
+  state.nuvio.metadataAddons = addons.map((addon) => ({
+    baseUrl: addon.baseUrl,
+    name: addon.name,
+  }));
+
+  const selectedUrl = getSelectedMetadataAddonUrl();
+  const stillValid = state.nuvio.metadataAddons.some((addon) => addon.baseUrl === selectedUrl);
+  if (!stillValid) {
+    state.nuvio.metadataAddonUrl = state.nuvio.metadataAddons[0]?.baseUrl || "";
+  }
+
+  saveState();
+  renderMetadataAddons();
+
+  if (state.nuvio.metadataAddons.length > 1) {
+    logLine(`Loaded ${state.nuvio.metadataAddons.length} metadata addons. Choose one for library enrichment and episode remapping.`);
+  } else if (state.nuvio.metadataAddons.length === 1) {
+    logLine(`Using metadata addon "${state.nuvio.metadataAddons[0].name}" for enrichment.`);
+  } else {
+    logLine("No compatible metadata addons were found on this Nuvio profile.");
+  }
 }
 
 async function fetchAllSimkl(paths, params, label, options, fetchOptions = {}) {
@@ -780,6 +878,18 @@ const SIMKL_ANIME_HISTORY_PARAMS = {
   extended: "full_anime_seasons",
   episode_watched_at: "yes",
   include_all_episodes: "original",
+};
+
+const SIMKL_LIBRARY_MOVIE_PARAMS = {
+  extended: "full",
+};
+
+const SIMKL_LIBRARY_SHOW_PARAMS = {
+  extended: "full",
+};
+
+const SIMKL_LIBRARY_ANIME_PARAMS = {
+  extended: "full_anime_seasons",
 };
 
 function formatRemapTimeout(ms) {
@@ -892,8 +1002,8 @@ async function prepareEpisodeMapper() {
     context.totalBudgetMs = EPISODE_REMAP_TOTAL_BUDGET_MS;
     context.fallbackStats = {};
     context.fallbackShows = {};
-    const addonNames = context.addons.map((addon) => addon.name).join(", ");
-    logLine(`Using Nuvio metadata addon${context.addons.length === 1 ? "" : "s"} for episode remapping: ${addonNames}.`);
+    const addonName = getSelectedMetadataAddonName();
+    logLine(`Using Nuvio metadata addon "${addonName}" for episode remapping.`);
     logLine(`Episode remapping fallback guard: addon ${formatRemapTimeout(context.metaTimeoutMs)}, Simkl ${formatRemapTimeout(context.simklTimeoutMs)}, total ${formatRemapTimeout(context.totalBudgetMs)}.`);
     return context;
   } catch (error) {
@@ -904,9 +1014,9 @@ async function prepareEpisodeMapper() {
 
 async function loadEpisodeMappingContext() {
   const selectedProfileId = Number(state.nuvio.profileId || 1);
-  const profile = state.nuvio.profiles.find((item) => Number(item.profile_index || item.id || 1) === selectedProfileId);
-  const effectiveProfileId = selectedProfileId !== 1 && profile?.uses_primary_addons ? 1 : selectedProfileId;
-  const key = `${effectiveProfileId}:${state.nuvio.session?.access_token || ""}`;
+  const effectiveProfileId = getEffectiveNuvioProfileId(selectedProfileId);
+  const selectedAddonUrl = getSelectedMetadataAddonUrl();
+  const key = `${effectiveProfileId}:${selectedAddonUrl}:${state.nuvio.session?.access_token || ""}`;
 
   if (episodeMappingContextPromise && episodeMappingContextKey === key) {
     return episodeMappingContextPromise;
@@ -914,7 +1024,10 @@ async function loadEpisodeMappingContext() {
 
   episodeMappingContextKey = key;
   episodeMappingContextPromise = pullNuvioMetadataAddons(effectiveProfileId)
-    .then((addons) => ({ addons, effectiveProfileId }))
+    .then((addons) => ({
+      addons: filterMetadataAddonsBySelection(addons),
+      effectiveProfileId,
+    }))
     .catch((error) => {
       episodeMappingContextPromise = null;
       episodeMappingContextKey = "";
@@ -1099,7 +1212,7 @@ function selectMetaAddonCandidates(addons, requestedType) {
   return candidates;
 }
 
-async function fetchMetaFromAddons(context, type, id) {
+async function fetchMetaWithAddonFromAddons(context, type, id) {
   if (!context?.addons?.length || !type || !id) return null;
   for (const { addon, type: candidateType } of selectMetaAddonCandidates(context.addons, type)) {
     const cacheKey = `${addon.baseUrl}|${candidateType}|${id}`;
@@ -1111,9 +1224,178 @@ async function fetchMetaFromAddons(context, type, id) {
         .catch(() => null);
       addonMetaCache.set(cacheKey, response);
     }
-    if (response?.meta) return response.meta;
+    if (response?.meta) return { meta: response.meta, addon };
   }
   return null;
+}
+
+async function fetchMetaFromAddons(context, type, id) {
+  const result = await fetchMetaWithAddonFromAddons(context, type, id);
+  return result?.meta || null;
+}
+
+function isUsableLibraryMeta(meta) {
+  return Boolean(meta && (meta.name || meta.poster || meta.description || meta.releaseInfo || meta.background));
+}
+
+function expandMetaIdCandidates(contentId, extraIds = []) {
+  const expanded = [];
+  for (const id of unique([contentId, ...extraIds])) {
+    expanded.push(id);
+    for (const prefix of ["mal", "tvdb", "tmdb", "simkl"]) {
+      const bare = barePrefixedId(id, prefix);
+      if (bare) {
+        expanded.push(`${prefix}:${bare}`);
+        expanded.push(bare);
+      }
+    }
+  }
+  return unique(expanded);
+}
+
+async function fetchLibraryMeta(contentId, contentType, context, extraIds = []) {
+  const typeCandidates = unique([
+    contentType,
+    inferCanonicalMetaType(contentType),
+    contentType === "anime" ? "anime" : null,
+    contentType === "movie" ? "movie" : null,
+    "series",
+    "movie",
+  ].filter(Boolean));
+  const metaIdCandidates = expandMetaIdCandidates(contentId, extraIds);
+
+  for (const type of typeCandidates) {
+    for (const id of metaIdCandidates) {
+      const result = await fetchMetaWithAddonFromAddons(context, type, id);
+      if (isUsableLibraryMeta(result?.meta)) {
+        return result;
+      }
+    }
+  }
+  return null;
+}
+
+function normalizeImageUrl(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const url = value.trim();
+  if (/^https?:\/\//i.test(url)) return url;
+  if (url.startsWith("//")) return `https:${url}`;
+  if (url.startsWith("/")) return `https://simkl.in${url}`;
+  return url;
+}
+
+function pickSimklImageUrl(media, keys) {
+  for (const key of keys) {
+    const value = media?.[key];
+    if (typeof value === "string") {
+      const normalized = normalizeImageUrl(value);
+      if (normalized) return normalized;
+    }
+    if (value && typeof value === "object") {
+      const normalized = normalizeImageUrl(value.url || value.full || value.medium || value.large);
+      if (normalized) return normalized;
+    }
+  }
+  return null;
+}
+
+function normalizeSimklGenres(genres) {
+  if (!Array.isArray(genres)) return [];
+  return genres
+    .map((genre) => {
+      if (typeof genre === "string") return genre.trim();
+      if (genre && typeof genre === "object") return String(genre.name || genre.title || "").trim();
+      return "";
+    })
+    .filter(Boolean);
+}
+
+function asRating(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function isPlaceholderAddonUrl(value) {
+  const url = String(value || "").trim().toLowerCase();
+  return !url || url === "https://simkl.com";
+}
+
+function applyAddonMetaToLibraryItem(item, result) {
+  if (!result?.meta) return item;
+  const meta = result.meta;
+  const addonBaseUrl = result.addon?.baseUrl;
+  const genres = Array.isArray(meta.genres) ? meta.genres.filter(Boolean) : [];
+
+  return {
+    ...item,
+    name: meta.name || item.name,
+    poster: normalizeImageUrl(meta.poster) || item.poster,
+    poster_shape: meta.posterShape || item.poster_shape || "POSTER",
+    background: normalizeImageUrl(meta.background) || normalizeImageUrl(meta.logo) || item.background,
+    description: meta.description || item.description,
+    release_info: meta.releaseInfo || (meta.year ? String(meta.year) : item.release_info),
+    imdb_rating: asRating(meta.imdbRating) ?? asRating(meta.rating) ?? item.imdb_rating,
+    genres: genres.length ? genres : item.genres,
+    addon_base_url: !isPlaceholderAddonUrl(addonBaseUrl) ? addonBaseUrl : item.addon_base_url,
+  };
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  if (!items.length) return [];
+  const results = new Array(items.length);
+  let index = 0;
+  async function worker() {
+    while (index < items.length) {
+      const current = index;
+      index += 1;
+      results[current] = await mapper(items[current], current);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+  return results;
+}
+
+async function prepareLibraryMetadataContext() {
+  if (!state.nuvio.session?.access_token) {
+    logLine("Nuvio is not connected, so library metadata enrichment from addons is skipped.");
+    return null;
+  }
+
+  try {
+    const context = await loadEpisodeMappingContext();
+    if (!context.addons.length) {
+      logLine("No compatible Nuvio metadata addon was found, so library items will use Simkl metadata only.");
+      return null;
+    }
+    context.metaTimeoutMs = EPISODE_REMAP_META_TIMEOUT_MS;
+    logLine(`Enriching library items from Nuvio metadata addon "${getSelectedMetadataAddonName()}".`);
+    return context;
+  } catch (error) {
+    logLine(`Library metadata enrichment unavailable: ${error.message}`);
+    return null;
+  }
+}
+
+async function enrichLibraryItemsWithAddonMeta(items, context) {
+  if (!context?.addons?.length || !items.length) return items;
+
+  const enrichedItems = await mapWithConcurrency(items, LIBRARY_META_ENRICH_CONCURRENCY, async (item) => {
+    const result = await fetchLibraryMeta(item.content_id, item.content_type, context, item._metaIds || []);
+    if (!result) return item;
+    return applyAddonMetaToLibraryItem(item, result);
+  });
+
+  const enrichedCount = enrichedItems.filter((item, index) => {
+    const before = items[index];
+    return Boolean(
+      (item.poster && !before.poster)
+      || (item.background && !before.background)
+      || (item.description && !before.description)
+      || (!isPlaceholderAddonUrl(item.addon_base_url) && isPlaceholderAddonUrl(before.addon_base_url)),
+    );
+  }).length;
+  logLine(`Enriched ${enrichedCount}/${items.length} library items with Nuvio addon metadata.`);
+  return enrichedItems;
 }
 
 async function fetchSeriesMeta(contentId, contentType, context) {
@@ -1569,9 +1851,9 @@ async function pullSimklPlan(options) {
 
   if (options.syncWatchlist) {
     const [movies, shows, anime] = await Promise.all([
-      fetchAllSimkl(["/sync/all-items/movies"], {}, "movie library items", options),
-      fetchAllSimkl(["/sync/all-items/shows"], {}, "show library items", options),
-      fetchAllSimkl(["/sync/all-items/anime"], {}, "anime library items", options),
+      fetchAllSimkl(["/sync/all-items/movies"], SIMKL_LIBRARY_MOVIE_PARAMS, "movie library items", options),
+      fetchAllSimkl(["/sync/all-items/shows"], SIMKL_LIBRARY_SHOW_PARAMS, "show library items", options),
+      fetchAllSimkl(["/sync/all-items/anime"], SIMKL_LIBRARY_ANIME_PARAMS, "anime library items", options),
     ]);
 
     const movieLibrary = mapLibraryItems(filterSimklByStatus(movies, SIMKL_LIBRARY_STATUSES.movie), "watchlist", "movie", remaps, plan);
@@ -1579,6 +1861,11 @@ async function pullSimklPlan(options) {
     const animeLibrary = mapLibraryItems(filterSimklByStatus(anime, SIMKL_LIBRARY_STATUSES.anime), "watchlist", "anime", remaps, plan);
 
     plan.library.push(...movieLibrary, ...showLibrary, ...animeLibrary);
+
+    const libraryMetadataContext = await prepareLibraryMetadataContext();
+    if (libraryMetadataContext && plan.library.length) {
+      plan.library = await enrichLibraryItemsWithAddonMeta(plan.library, libraryMetadataContext);
+    }
   }
 
   plan.library = dedupeBy(plan.library, (item) => item.content_id, "added_at");
@@ -1801,27 +2088,29 @@ function mapLibraryItems(items, source, contentKind, remaps, plan) {
   const mapped = [];
   for (const item of items) {
     const media = contentKind === "movie" ? item.movie || item : item.show || item;
-    const id = resolveContentId(media?.ids, contentKind, remaps, plan, {
-      animeType: contentKind === "anime" ? item.anime_type : undefined,
-    });
+    const animeOptions = contentKind === "anime" ? { animeType: item.anime_type } : undefined;
+    const id = resolveContentId(media?.ids, contentKind, remaps, plan, animeOptions);
     if (!id) {
       skip(plan, media?.title || source, `missing ${contentKind} ID`);
       continue;
     }
+    const metaIds = idCandidates(media?.ids || {}, contentKind, animeOptions).map((candidate) => candidate.value);
+    const genres = normalizeSimklGenres(media?.genres);
     mapped.push({
       content_id: id.value,
       content_type: contentKind === "movie" ? "movie" : contentKind === "anime" ? "anime" : "series",
       name: media.title || "Untitled",
-      poster: null,
+      poster: pickSimklImageUrl(media, ["poster", "thumb"]),
       poster_shape: "POSTER",
-      background: null,
+      background: pickSimklImageUrl(media, ["fanart", "backdrop", "background"]),
       description: media.overview || null,
       release_info: media.year ? String(media.year) : null,
-      imdb_rating: typeof media.rating === "number" ? media.rating : null,
-      genres: Array.isArray(media.genres) ? media.genres : [],
-      addon_base_url: "https://simkl.com",
+      imdb_rating: asRating(media.rating),
+      genres,
+      addon_base_url: null,
       added_at: toEpochMs(item.listed_at || item.collected_at || item.updated_at),
       _source: source,
+      _metaIds: unique([id.value, ...metaIds]),
     });
   }
   return mapped;
@@ -1959,7 +2248,7 @@ async function pushPlanToNuvio(plan) {
   if (plan.library.length) {
     logLine("Pulling current Nuvio library before merge because Nuvio library push is full replace.");
     const existing = await pullNuvioLibrary(profileId);
-    const merged = dedupeBy([...existing.map(cleanNuvioLibraryItem), ...plan.library.map(stripPrivateFields)], (item) => item.content_id, "added_at");
+    const merged = mergeNuvioLibrary(existing, plan.library);
     await nuvioRpc("sync_push_library", {
       p_profile_id: profileId,
       p_items: merged,
@@ -2039,9 +2328,51 @@ function cleanNuvioLibraryItem(item) {
     release_info: item.release_info,
     imdb_rating: item.imdb_rating,
     genres: Array.isArray(item.genres) ? item.genres : [],
-    addon_base_url: item.addon_base_url,
+    addon_base_url: isPlaceholderAddonUrl(item.addon_base_url) ? null : item.addon_base_url,
     added_at: Number(item.added_at || Date.now()),
   };
+}
+
+function pickLibraryField(incoming, existing) {
+  if (incoming === null || incoming === undefined || incoming === "") return existing ?? incoming;
+  if (Array.isArray(incoming) && !incoming.length && Array.isArray(existing) && existing.length) return existing;
+  if (isPlaceholderAddonUrl(incoming)) return existing ?? null;
+  return incoming;
+}
+
+function mergeLibraryItemFields(existing, incoming) {
+  return {
+    content_id: incoming.content_id,
+    content_type: incoming.content_type || existing.content_type,
+    name: pickLibraryField(incoming.name, existing.name),
+    poster: pickLibraryField(incoming.poster, existing.poster),
+    poster_shape: incoming.poster_shape || existing.poster_shape || "POSTER",
+    background: pickLibraryField(incoming.background, existing.background),
+    description: pickLibraryField(incoming.description, existing.description),
+    release_info: pickLibraryField(incoming.release_info, existing.release_info),
+    imdb_rating: pickLibraryField(incoming.imdb_rating, existing.imdb_rating),
+    genres: Array.isArray(incoming.genres) && incoming.genres.length ? incoming.genres : (existing.genres || []),
+    addon_base_url: pickLibraryField(incoming.addon_base_url, existing.addon_base_url),
+    added_at: Math.max(Number(existing.added_at || 0), Number(incoming.added_at || 0)),
+  };
+}
+
+function mergeNuvioLibrary(existingItems, importedItems) {
+  const byId = new Map(
+    (Array.isArray(existingItems) ? existingItems : [])
+      .map(cleanNuvioLibraryItem)
+      .filter((item) => item.content_id)
+      .map((item) => [item.content_id, item]),
+  );
+
+  for (const raw of importedItems) {
+    const incoming = cleanNuvioLibraryItem(stripPrivateFields(raw));
+    if (!incoming.content_id) continue;
+    const prior = byId.get(incoming.content_id);
+    byId.set(incoming.content_id, prior ? mergeLibraryItemFields(prior, incoming) : incoming);
+  }
+
+  return [...byId.values()].sort((left, right) => Number(right.added_at || 0) - Number(left.added_at || 0));
 }
 
 function stripPrivateFields(item) {
@@ -2218,9 +2549,12 @@ async function disconnectNuvio() {
   }
   state.nuvio.session = null;
   state.nuvio.profiles = [];
+  state.nuvio.metadataAddons = [];
+  state.nuvio.metadataAddonUrl = "";
   clearEpisodeMappingCaches();
   saveState();
   renderProfiles();
+  renderMetadataAddons();
   updateAuthStatus();
   logLine("Nuvio disconnected locally.");
 }
@@ -2266,11 +2600,30 @@ dom.copyLog.addEventListener("click", async () => {
   dom.syncProgress,
   dom.syncWatchlist,
   dom.syncCollection,
-  dom.profileSelect,
+  dom.metadataAddonSelect,
 ].filter(Boolean).forEach((field) => {
-  field.addEventListener("change", readOptions);
+  field.addEventListener("change", () => {
+    readOptions();
+    clearEpisodeMappingCaches();
+  });
   field.addEventListener("input", readOptions);
 });
+
+if (dom.profileSelect) {
+  dom.profileSelect.addEventListener("change", async () => {
+    readOptions();
+    try {
+      setBusy(true);
+      await loadNuvioMetadataAddons();
+    } catch (error) {
+      logLine(`Error: ${error.message}`);
+      toast(error.message);
+    } finally {
+      setBusy(false);
+      updateAuthStatus();
+    }
+  });
+}
 
 if (dom.previewPrev) {
   dom.previewPrev.addEventListener("click", () => renderPreviewPage(previewPage - 1));
