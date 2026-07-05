@@ -1,8 +1,8 @@
 "use strict";
 
 const TRAKT_API = "https://api.trakt.tv";
-const NUVIO_BASE = "https://dpyhjjcoabcglfmgecug.supabase.co";
-const NUVIO_KEY = "sb_publishable_zcNkgqGJjBtj8GoRlMvl9A_zkdmXhf5";
+const NUVIO_BASE = "https://api.nuvio.tv";
+const NUVIO_KEY = "sb_publishable_1Clq8rlTVACkdcZuqr6_AD__xUUC_EN";
 const APP_CONFIG = globalThis.NUVIO_TRAKT_BRIDGE_CONFIG || {};
 const PREFS_KEY = "nuvio-trakt-bridge:prefs:v1";
 const SESSION_KEY = "nuvio-trakt-bridge:session:v1";
