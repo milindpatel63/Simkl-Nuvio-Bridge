@@ -1,3 +1,10 @@
+> [!WARNING]
+> **This repository has moved!**
+> Active development and maintenance have shifted to the Nuvio Wiki where this tool and many others by me have been embedded.
+> 
+> **https://github.com/haaihond/Nuvio-Wiki-Website**
+
+
 # Nuvio Trakt Bridge
 
 Standalone static web tool for importing Trakt watched history, playback progress, watchlist, and collection data into Nuvio Sync.
