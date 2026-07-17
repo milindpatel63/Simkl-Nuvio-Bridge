@@ -1,8 +1,8 @@
 "use strict";
 
 const SIMKL_API = "https://api.simkl.com";
-const NUVIO_BASE = "https://dpyhjjcoabcglfmgecug.supabase.co";
-const NUVIO_KEY = "sb_publishable_zcNkgqGJjBtj8GoRlMvl9A_zkdmXhf5";
+const NUVIO_BASE = "https://api.nuvio.tv";
+const NUVIO_KEY = "sb_publishable_1Clq8rlTVACkdcZuqr6_AD__xUUC_EN";
 const APP_CONFIG = globalThis.NUVIO_SIMKL_BRIDGE_CONFIG || {};
 const PREFS_KEY = "nuvio-simkl-bridge:prefs:v1";
 const SESSION_KEY = "nuvio-simkl-bridge:session:v1";
@@ -1814,9 +1814,7 @@ async function pullSimklPlan(options) {
     fallbackIds: 0,
     remappedEpisodes: 0,
   };
-  const episodeMapper = options.syncHistory || options.syncProgress
-    ? await prepareEpisodeMapper()
-    : null;
+  const episodeMapper = await prepareEpisodeMapper();
 
   if (options.syncHistory) {
     const [movies, shows, anime] = await Promise.all([
@@ -2084,7 +2082,7 @@ async function mapPlayback(items, forcedType, remaps, plan, options, episodeMapp
   return mapped;
 }
 
-function mapLibraryItems(items, source, contentKind, remaps, plan) {
+async function mapLibraryItems(items, source, contentKind, remaps, plan, episodeMapper) {
   const mapped = [];
   for (const item of items) {
     const media = contentKind === "movie" ? item.movie || item : item.show || item;
@@ -2313,6 +2311,21 @@ async function verifyNuvioPush(profileId, plan) {
     const actual = new Set(progress.map(progressKey));
     const matched = [...expected].filter((key) => actual.has(key)).length;
     logLine(`Verified ${matched}/${expected.size} progress keys in Nuvio Sync profile ${profileId}.`);
+  }
+}
+
+function mergeLibraryMetadata(merged, existingItems) {
+  if (!existingItems.length) return;
+  const existingMap = new Map();
+  for (const item of existingItems) {
+    if (item.content_id) existingMap.set(item.content_id, item);
+  }
+  for (const item of merged) {
+    const existing = existingMap.get(item.content_id);
+    if (!existing) continue;
+    if (!item.poster && existing.poster) item.poster = existing.poster;
+    if (!item.background && existing.background) item.background = existing.background;
+    if (!item.description && existing.description) item.description = existing.description;
   }
 }
 
